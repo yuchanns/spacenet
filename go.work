@@ -2,6 +2,8 @@ go 1.27
 
 use (
 	.
+	./cmd/spacenet
+	./contrib/all
 	./contrib/cluster
 	./contrib/crypt
 	./contrib/debug
@@ -14,6 +16,7 @@ use (
 
 replace (
 	github.com/yuchanns/spacenet v0.0.0 => .
+	github.com/yuchanns/spacenet/contrib/all v0.0.0 => ./contrib/all
 	github.com/yuchanns/spacenet/contrib/cluster v0.0.0 => ./contrib/cluster
 	github.com/yuchanns/spacenet/contrib/crypt v0.0.0 => ./contrib/crypt
 	github.com/yuchanns/spacenet/contrib/debug v0.0.0 => ./contrib/debug

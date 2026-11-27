@@ -61,7 +61,7 @@ local function is_abs(p)
 	if p:sub(1,1) == [[/]] or p:sub(1,1) == [[\]] then
 		return true
 	end
-	if p:match([[^[A-Za-z]:[/\]]]) then
+	if p:match([=[^[A-Za-z]:[/\]]=]) then
 		return true
 	end
 	return false
@@ -79,9 +79,10 @@ local function include(cfg)
 		name = cfg
 	end
 	local f = assert(io.open(current_path .. name))
-	local code = assert(f:read [[*a]])
-	code = string.gsub(code, [[%$([%w_%d]+)]], getenv)
+	local code, rerr = f:read [[*a]]
 	f:close()
+	assert(code, rerr)
+	code = string.gsub(code, [[%$([%w_%d]+)]], getenv)
 	assert(load(code, [[@]]..name, [[t]], result))()
 	current_path = last_path
 end
