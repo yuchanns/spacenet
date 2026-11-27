@@ -1,4 +1,4 @@
-// Package socket provides Skynet-compatible pure-Go TCP/UDP networking
+// Package socket provides Skynet-compatible TCP/UDP networking
 // (skynet.socketdriver, skynet.netpack, skynet.socket, skynet.socketchannel,
 // skynet.dns, snax.gateserver/msgserver/loginserver, and gate.lua).
 package socket
@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"os"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/yuchanns/moelua"
 	"github.com/yuchanns/spacenet/runtime"
+	"github.com/yuchanns/spacenet/runtime/contrib"
 )
 
 // Skynet socket message types (matching skynet-src/skynet_socket.h).
@@ -48,27 +48,18 @@ type SocketEvent struct {
 	UDPAddr []byte
 }
 
-type contrib struct{}
-
 // New returns the socket contrib.
-func New() runtime.Contrib { return contrib{} }
-
-func (contrib) Name() string                      { return "socket" }
-func (contrib) Dependencies() []runtime.Contrib   { return nil }
-func (contrib) FS() fs.FS                         { return subFS }
-func (contrib) Services() map[string]runtime.ServiceFactory { return nil }
-
-func (contrib) InitNode(n *runtime.Node) (io.Closer, error) {
-	mgr := newManager(n)
-	n.SetExt(extKey, mgr)
-	return mgr, nil
-}
-
-func (contrib) Preloads() map[string]moelua.GoFunc {
-	return map[string]moelua.GoFunc{
-		"skynet.socketdriver": preloadSocketDriver,
-		"skynet.netpack":      preloadNetpack,
-	}
+func New() *contrib.Contrib {
+	return contrib.New("socket",
+		contrib.WithInit(func(n *runtime.Node) (io.Closer, error) {
+			mgr := newManager(n)
+			n.SetExt(extKey, mgr)
+			return mgr, nil
+		}),
+		contrib.WithFS(subFS),
+		contrib.WithPreload("skynet.socketdriver", preloadSocketDriver),
+		contrib.WithPreload("skynet.netpack", preloadNetpack),
+	)
 }
 
 func managerFromState(s *moelua.State) (*manager, *runtime.Actor, error) {
@@ -115,6 +106,7 @@ type sockEntry struct {
 	readerRunning bool
 	paused        bool
 	pauseCond     *sync.Cond
+	errored       bool
 	closing       bool
 	closed        bool
 	closeSent     bool
@@ -150,10 +142,9 @@ func newManager(n *runtime.Node) *manager {
 func (m *manager) allocEntry(kind sockKind, owner uint32) *sockEntry {
 	id := int(m.nextID.Add(1))
 	e := &sockEntry{
-		id:       id,
-		kind:     kind,
-		owner:    owner,
-		warnSize: defaultWarnSize,
+		id:    id,
+		kind:  kind,
+		owner: owner,
 	}
 	e.pauseCond = sync.NewCond(&e.mu)
 	m.mu.Lock()
@@ -193,16 +184,49 @@ func (m *manager) Close() error {
 	return nil
 }
 
-func (m *manager) emit(owner uint32, ev *SocketEvent) {
+func (m *manager) emit(owner uint32, ev *SocketEvent) bool {
 	if m.closed.Load() || owner == 0 {
-		return
+		return false
 	}
-	m.node.PushTypedMessage(owner, runtime.Message{
+	return m.node.PushTypedMessage(owner, runtime.Message{
 		Source:  0,
 		Session: 0,
 		Type:    runtime.PTypeSocket,
 		Payload: ev,
 	})
+}
+
+// failTransport marks the entry errored, closes its underlying connection,
+// drops queued writes, and emits SocketTypeError while keeping the entry
+// registered so a subsequent shutdown/close from Lua can deliver SocketTypeClose
+// (matching Skynet's socket_server.c). If the owner cannot be reached, the entry
+// is retired immediately.
+func (e *sockEntry) failTransport(m *manager, err error) {
+	e.mu.Lock()
+	if e.closed || e.closing || e.errored {
+		e.mu.Unlock()
+		return
+	}
+	e.errored = true
+	conn := e.conn
+	owner := e.owner
+	e.highQ = nil
+	e.lowQ = nil
+	e.wbSize = 0
+	e.warnSize = 0
+	e.pauseCond.Broadcast()
+	e.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if !m.emit(owner, &SocketEvent{
+		Type: SocketTypeError,
+		ID:   e.id,
+		Text: err.Error(),
+	}) {
+		e.forceClose(m, false)
+	}
 }
 
 func (e *sockEntry) forceClose(m *manager, notify bool) {
@@ -262,9 +286,13 @@ func (e *sockEntry) closeGraceful(m *manager) {
 
 func (e *sockEntry) enqueueWrite(m *manager, item writeItem, low bool) bool {
 	e.mu.Lock()
-	if e.closed || e.closing {
+	if e.closed || e.closing || e.errored {
 		e.mu.Unlock()
 		return false
+	}
+	if e.kind == kindUDP && item.addr == nil && e.udpPeer != nil {
+		peerCopy := *e.udpPeer
+		item.addr = &peerCopy
 	}
 	if low {
 		e.lowQ = append(e.lowQ, item)
@@ -273,10 +301,14 @@ func (e *sockEntry) enqueueWrite(m *manager, item writeItem, low bool) bool {
 	}
 	e.wbSize += int64(len(item.data))
 	var warnKB int
-	if e.wbSize > e.warnSize {
+	if e.wbSize >= defaultWarnSize && e.wbSize >= e.warnSize {
 		warnKB = int((e.wbSize + 1023) / 1024)
-		for e.warnSize <= e.wbSize {
-			e.warnSize *= 2
+		if e.warnSize == 0 {
+			e.warnSize = defaultWarnSize * 2
+		} else {
+			for e.warnSize <= e.wbSize {
+				e.warnSize *= 2
+			}
 		}
 	}
 	owner := e.owner
@@ -303,9 +335,13 @@ func (e *sockEntry) enqueueWrite(m *manager, item writeItem, low bool) bool {
 func (e *sockEntry) writerLoop(m *manager) {
 	for {
 		e.mu.Lock()
-		if e.closed {
+		if e.closed || e.errored {
 			e.writing = false
+			closing := e.closing && !e.closed
 			e.mu.Unlock()
+			if closing {
+				e.forceClose(m, true)
+			}
 			return
 		}
 		var item writeItem
@@ -324,7 +360,19 @@ func (e *sockEntry) writerLoop(m *manager) {
 		if !hasItem {
 			e.writing = false
 			closing := e.closing
+			emitRecovery := !closing && !e.errored && e.warnSize > 0
+			if emitRecovery {
+				e.warnSize = 0
+			}
+			owner := e.owner
 			e.mu.Unlock()
+			if emitRecovery {
+				m.emit(owner, &SocketEvent{
+					Type: SocketTypeWarning,
+					ID:   e.id,
+					UD:   0,
+				})
+			}
 			if closing {
 				e.forceClose(m, true)
 			}
@@ -336,19 +384,13 @@ func (e *sockEntry) writerLoop(m *manager) {
 		}
 		conn := e.conn
 		pc := e.pktConn
-		udpPeer := e.udpPeer
-		owner := e.owner
 		e.mu.Unlock()
 
 		var n int
 		var err error
 		if e.kind == kindUDP {
-			target := item.addr
-			if target == nil {
-				target = udpPeer
-			}
-			if pc != nil && target != nil {
-				n, err = pc.WriteTo(item.data, target)
+			if pc != nil && item.addr != nil {
+				n, err = pc.WriteTo(item.data, item.addr)
 			} else if conn != nil {
 				n, err = conn.Write(item.data)
 			} else {
@@ -364,26 +406,26 @@ func (e *sockEntry) writerLoop(m *manager) {
 			e.statWrite.Add(uint64(n))
 			e.statWTime.Store(m.node.Timer().Now())
 		}
-		if err != nil {
+		if err != nil && e.kind != kindUDP {
 			e.mu.Lock()
-			wasClosing := e.closing || e.closed
+			e.writing = false
+			closed := e.closed
+			errored := e.errored
+			closing := e.closing
 			e.mu.Unlock()
-			if !wasClosing && e.kind != kindUDP {
-				m.emit(owner, &SocketEvent{
-					Type: SocketTypeError,
-					ID:   e.id,
-					Text: err.Error(),
-				})
-				e.forceClose(m, false)
-				return
+			if closing && !closed {
+				e.forceClose(m, true)
+			} else if !closed && !errored {
+				e.failTransport(m, err)
 			}
+			return
 		}
 	}
 }
 
 func (e *sockEntry) startTCPReader(m *manager) {
 	e.mu.Lock()
-	if e.closed || e.readerRunning || e.conn == nil {
+	if e.closed || e.errored || e.readerRunning || e.conn == nil {
 		e.mu.Unlock()
 		return
 	}
@@ -395,10 +437,10 @@ func (e *sockEntry) startTCPReader(m *manager) {
 		buf := make([]byte, 32*1024)
 		for {
 			e.mu.Lock()
-			for e.paused && !e.closed {
+			for e.paused && !e.closed && !e.errored {
 				e.pauseCond.Wait()
 			}
-			if e.closed {
+			if e.closed || e.errored {
 				e.mu.Unlock()
 				return
 			}
@@ -407,31 +449,41 @@ func (e *sockEntry) startTCPReader(m *manager) {
 			n, err := conn.Read(buf)
 			e.mu.Lock()
 			owner := e.owner
-			closing := e.closing || e.closed
+			closed := e.closed
+			errored := e.errored
+			closing := e.closing
+			writing := e.writing
 			e.mu.Unlock()
 
-			if n > 0 {
+			if n > 0 && !closed && !errored {
 				e.statRead.Add(uint64(n))
 				e.statRTime.Store(m.node.Timer().Now())
 				cp := make([]byte, n)
 				copy(cp, buf[:n])
-				m.emit(owner, &SocketEvent{
+				if !m.emit(owner, &SocketEvent{
 					Type: SocketTypeData,
 					ID:   e.id,
 					UD:   n,
 					Data: cp,
-				})
+				}) {
+					e.forceClose(m, false)
+					return
+				}
 			}
 			if err != nil {
-				if errors.Is(err, io.EOF) || closing {
+				if closed || errored {
+					return
+				}
+				if closing {
+					if !writing {
+						e.forceClose(m, true)
+					}
+					return
+				}
+				if errors.Is(err, io.EOF) {
 					e.forceClose(m, true)
 				} else {
-					m.emit(owner, &SocketEvent{
-						Type: SocketTypeError,
-						ID:   e.id,
-						Text: err.Error(),
-					})
-					e.forceClose(m, false)
+					e.failTransport(m, err)
 				}
 				return
 			}
@@ -459,12 +511,12 @@ func (e *sockEntry) startAcceptLoop(m *manager) {
 			if err != nil {
 				if closing {
 					e.forceClose(m, true)
-				} else {
-					m.emit(owner, &SocketEvent{
-						Type: SocketTypeError,
-						ID:   e.id,
-						Text: err.Error(),
-					})
+				} else if !m.emit(owner, &SocketEvent{
+					Type: SocketTypeError,
+					ID:   e.id,
+					Text: err.Error(),
+				}) {
+					e.forceClose(m, false)
 				}
 				return
 			}
@@ -476,12 +528,16 @@ func (e *sockEntry) startAcceptLoop(m *manager) {
 			child.peerAddr = conn.RemoteAddr().String()
 			child.paused = true // 0 reader goroutines until driver.start(newid)!
 
-			m.emit(owner, &SocketEvent{
+			if !m.emit(owner, &SocketEvent{
 				Type: SocketTypeAccept,
 				ID:   e.id,
 				UD:   child.id,
 				Text: child.peerAddr,
-			})
+			}) {
+				child.forceClose(m, false)
+				e.forceClose(m, false)
+				return
+			}
 		}
 	}()
 }
@@ -518,13 +574,16 @@ func (e *sockEntry) startUDPReader(m *manager) {
 			if uaddr, ok := addr.(*net.UDPAddr); ok {
 				encodedAddr = encodeUDPAddr(uaddr)
 			}
-			m.emit(owner, &SocketEvent{
+			if !m.emit(owner, &SocketEvent{
 				Type:    SocketTypeUDP,
 				ID:      e.id,
 				UD:      n,
 				Data:    cp,
 				UDPAddr: encodedAddr,
-			})
+			}) {
+				e.forceClose(m, false)
+				return
+			}
 		}
 	}()
 }
@@ -825,16 +884,11 @@ func (m *manager) lConnect(s *moelua.State, args []moelua.Value) ([]moelua.Value
 	go func() {
 		conn, derr := net.Dial("tcp", target)
 		if derr != nil {
-			m.emit(owner, &SocketEvent{
-				Type: SocketTypeError,
-				ID:   e.id,
-				Text: derr.Error(),
-			})
-			e.forceClose(m, false)
+			e.failTransport(m, derr)
 			return
 		}
 		e.mu.Lock()
-		if e.closed || e.closing {
+		if e.closed || e.closing || e.errored {
 			e.mu.Unlock()
 			_ = conn.Close()
 			return
@@ -844,11 +898,14 @@ func (m *manager) lConnect(s *moelua.State, args []moelua.Value) ([]moelua.Value
 		e.started = true
 		e.mu.Unlock()
 
-		m.emit(owner, &SocketEvent{
+		if !m.emit(owner, &SocketEvent{
 			Type: SocketTypeConnect,
 			ID:   e.id,
 			Text: e.peerAddr,
-		})
+		}) {
+			e.forceClose(m, false)
+			return
+		}
 		e.startTCPReader(m)
 	}()
 
@@ -872,6 +929,15 @@ func (m *manager) lStart(s *moelua.State, args []moelua.Value) ([]moelua.Value, 
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
+		return nil, nil
+	}
+	if e.errored {
+		e.mu.Unlock()
+		m.emit(actor.Handle(), &SocketEvent{
+			Type: SocketTypeError,
+			ID:   e.id,
+			Text: "socket closed",
+		})
 		return nil, nil
 	}
 	e.owner = actor.Handle()
@@ -1008,6 +1074,9 @@ func (m *manager) lBind(s *moelua.State, args []moelua.Value) ([]moelua.Value, e
 		return nil, errors.New("bind requires os fd")
 	}
 	fd := int(toInt(args[0]))
+	if fd != 0 {
+		return nil, fmt.Errorf("socket.bind: binding os fd %d is not supported (only stdin fd 0 is supported)", fd)
+	}
 	e := m.allocEntry(kindBind, actor.Handle())
 	owner := actor.Handle()
 
@@ -1017,38 +1086,39 @@ func (m *manager) lBind(s *moelua.State, args []moelua.Value) ([]moelua.Value, e
 		Text: "bind",
 	})
 
-	if fd == 0 {
-		// Only stream stdin when attached to a pipe/terminal with readable bytes;
-		// avoid hanging on closed/devnull stdin in headless tests.
-		if fi, statErr := os.Stdin.Stat(); statErr == nil && (fi.Mode()&os.ModeNamedPipe != 0 || fi.Mode()&os.ModeCharDevice != 0) {
-			go func() {
-				buf := make([]byte, 4096)
-				for {
-					n, rerr := os.Stdin.Read(buf)
-					e.mu.Lock()
-					closed := e.closed
-					curOwner := e.owner
-					e.mu.Unlock()
-					if closed {
-						return
-					}
-					if n > 0 {
-						cp := make([]byte, n)
-						copy(cp, buf[:n])
-						m.emit(curOwner, &SocketEvent{
-							Type: SocketTypeData,
-							ID:   e.id,
-							UD:   n,
-							Data: cp,
-						})
-					}
-					if rerr != nil {
-						e.forceClose(m, true)
+	// Only stream stdin when attached to a pipe/terminal with readable bytes;
+	// avoid hanging on closed/devnull stdin in headless tests.
+	if fi, statErr := os.Stdin.Stat(); statErr == nil && (fi.Mode()&os.ModeNamedPipe != 0 || fi.Mode()&os.ModeCharDevice != 0) {
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, rerr := os.Stdin.Read(buf)
+				e.mu.Lock()
+				closed := e.closed
+				curOwner := e.owner
+				e.mu.Unlock()
+				if closed {
+					return
+				}
+				if n > 0 {
+					cp := make([]byte, n)
+					copy(cp, buf[:n])
+					if !m.emit(curOwner, &SocketEvent{
+						Type: SocketTypeData,
+						ID:   e.id,
+						UD:   n,
+						Data: cp,
+					}) {
+						e.forceClose(m, false)
 						return
 					}
 				}
-			}()
-		}
+				if rerr != nil {
+					e.forceClose(m, true)
+					return
+				}
+			}
+		}()
 	}
 	return []moelua.Value{moelua.Int(int64(e.id))}, nil
 }

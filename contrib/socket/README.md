@@ -1,6 +1,6 @@
 # contrib/socket
 
-Pure-Go TCP/UDP networking contrib module for `spacenet`, providing `skynet.socketdriver`, `skynet.netpack`, `skynet.socket`, `skynet.socketchannel`, `skynet.dns`, `snax.gateserver`, `snax.msgserver`, `snax.loginserver`, and the `gate` service.
+TCP/UDP networking contrib module for `spacenet`, providing `skynet.socketdriver`, `skynet.netpack`, `skynet.socket`, `skynet.socketchannel`, `skynet.dns`, `snax.gateserver`, `snax.msgserver`, `snax.loginserver`, and the `gate` service.
 
 ## Usage
 
@@ -19,4 +19,4 @@ node, err := spacenet.New(
 
 ## License
 
-Apache-2.0
+Apache-2.0 — see [LICENSE](LICENSE).
