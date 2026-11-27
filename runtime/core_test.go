@@ -1,7 +1,13 @@
 package runtime
 
 import (
+	"context"
+	"errors"
+	"io"
+	"io/fs"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yuchanns/moelua"
 )
@@ -132,5 +138,173 @@ func TestSeriRoundTripAndPairs(t *testing.T) {
 	proxyTbl := s.TableOf(unpacked[11])
 	if proxyTbl.GetString("a").Int() != 1 || !proxyTbl.GetString("c").IsTrue() {
 		t.Fatalf("__pairs table mismatch")
+	}
+}
+
+type stubContrib struct {
+	name   string
+	deps   []Contrib
+	initFn func(*Node) (io.Closer, error)
+}
+
+func (c stubContrib) Name() string                        { return c.name }
+func (c stubContrib) Dependencies() []Contrib             { return c.deps }
+func (c stubContrib) InitNode(n *Node) (io.Closer, error) { return c.initFn(n) }
+func (c stubContrib) FS() fs.FS                           { return nil }
+func (c stubContrib) Preloads() map[string]moelua.GoFunc  { return nil }
+func (c stubContrib) Services() map[string]ServiceFactory { return nil }
+
+type closeRecorder struct{ closed *atomic.Bool }
+
+func (c closeRecorder) Close() error { c.closed.Store(true); return nil }
+
+func TestInitContribFailureDoesNotDeadlock(t *testing.T) {
+	var firstClosed atomic.Bool
+	first := stubContrib{
+		name: "first",
+		initFn: func(_ *Node) (io.Closer, error) {
+			return closeRecorder{closed: &firstClosed}, nil
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewNode(Config{
+			LogOutput: io.Discard,
+			Contribs: []Contrib{
+				first,
+				stubContrib{
+					name: "failing",
+					deps: []Contrib{first},
+					initFn: func(_ *Node) (io.Closer, error) {
+						return nil, errors.New("boom")
+					},
+				},
+			},
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected init error, got nil")
+		}
+		if !firstClosed.Load() {
+			t.Fatal("expected first contrib closer to be called on partial init failure")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("NewNode deadlocked when contrib InitNode failed")
+	}
+}
+
+func TestUnpackGoValuesRejectsNonComparableKey(t *testing.T) {
+	s := moelua.New()
+	defer s.Close()
+
+	res, err := s.DoString(`return { [{1, 2}] = "val" }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packed, err := PackLuaValues(s, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnpackGoValues(packed); err == nil {
+		t.Fatal("expected error for non-comparable table key in UnpackGoValues")
+	}
+}
+
+type dummyService struct {
+	releaseCh chan struct{}
+}
+
+func (d *dummyService) Init(_ *Actor, _ string) error      { return nil }
+func (d *dummyService) Dispatch(a *Actor, _ *Message) error {
+	if d.releaseCh != nil {
+		<-d.releaseCh
+		a.Node().Kill(a, 0)
+	}
+	return nil
+}
+func (d *dummyService) Signal(_ *Actor, _ int) {}
+func (d *dummyService) Close(_ *Actor)         {}
+
+func TestWaitResetsAcrossSequentialLaunches(t *testing.T) {
+	n, err := NewNode(Config{Threads: 2, LogOutput: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+
+	ch1 := make(chan struct{})
+	ch2 := make(chan struct{})
+	n.svcMu.Lock()
+	n.services["s1"] = func() ServiceHandler { return &dummyService{releaseCh: ch1} }
+	n.services["s2"] = func() ServiceHandler { return &dummyService{releaseCh: ch2} }
+	n.svcMu.Unlock()
+
+	h1, err := n.Launch("s1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = n.Send(nil, 0, h1, PTypeText, 0, []byte("go"))
+	close(ch1)
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel1()
+	if err := n.Wait(ctx1); err != nil {
+		t.Fatalf("first Wait failed: %v", err)
+	}
+
+	// Launch a second service after activeActors reached 0; Wait must block until it exits.
+	h2, err := n.Launch("s2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone := make(chan error, 1)
+	go func() {
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel2()
+		waitDone <- n.Wait(ctx2)
+	}()
+
+	select {
+	case err := <-waitDone:
+		t.Fatalf("second Wait returned prematurely while s2 was still active: %v", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	_ = n.Send(nil, 0, h2, PTypeText, 0, []byte("go"))
+	close(ch2)
+	if err := <-waitDone; err != nil {
+		t.Fatalf("second Wait failed: %v", err)
+	}
+}
+
+func TestHarborDeliveryFailureToRetiredGlobalService(t *testing.T) {
+	n, err := NewNode(Config{Threads: 2, LogOutput: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+
+	n.svcMu.Lock()
+	n.services["noop"] = func() ServiceHandler { return &dummyService{} }
+	n.svcMu.Unlock()
+	harborH, err := n.Launch("harbor", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svcH, err := n.Launch("noop", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Register global name "GSVC" pointing to svcH.
+	_ = n.Send(nil, svcH, harborH, PTypeHarbor, 0, []byte("N GSVC"))
+	time.Sleep(50 * time.Millisecond)
+
+	// Retire svcH; SendName to "GSVC" must return -1 instead of succeeding silently.
+	n.Kill(nil, svcH)
+	if ret := n.SendName(nil, 0, "GSVC", PTypeLua, 1, []byte("ping")); ret != -1 {
+		t.Fatalf("SendName to retired global service returned %d, want -1", ret)
 	}
 }

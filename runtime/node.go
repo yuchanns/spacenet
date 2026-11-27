@@ -176,10 +176,12 @@ type Node struct {
 	profileDef  bool
 
 	activeActors atomic.Int64
-	zeroOnce     sync.Once
+	zeroMu       sync.Mutex
 	zeroCh       chan struct{}
+	zeroClosed   bool
 
 	monitors   []*workerMonitor
+	monStarted atomic.Bool
 	stopMonCh  chan struct{}
 	monDoneCh  chan struct{}
 	workerWG   sync.WaitGroup
@@ -325,6 +327,7 @@ func NewNode(cfg Config) (*Node, error) {
 		n.workerWG.Add(1)
 		go n.workerLoop(mon, w)
 	}
+	n.monStarted.Store(true)
 	go n.monitorLoop()
 
 	return n, nil
@@ -431,12 +434,31 @@ func (n *Node) SetEnv(key, val string) {
 	n.envMu.Unlock()
 }
 
-func (n *Node) decActiveActors() {
-	if n.activeActors.Add(-1) == 0 {
-		n.zeroOnce.Do(func() {
-			close(n.zeroCh)
-		})
+func (n *Node) incActiveActors() {
+	n.zeroMu.Lock()
+	if n.activeActors.Add(1) == 1 && n.zeroClosed {
+		n.zeroCh = make(chan struct{})
+		n.zeroClosed = false
 	}
+	n.zeroMu.Unlock()
+}
+
+func (n *Node) decActiveActors() {
+	n.zeroMu.Lock()
+	if n.activeActors.Add(-1) == 0 && !n.zeroClosed {
+		close(n.zeroCh)
+		n.zeroClosed = true
+	}
+	n.zeroMu.Unlock()
+}
+
+func (n *Node) signalZeroIfEmpty() {
+	n.zeroMu.Lock()
+	if n.activeActors.Load() == 0 && !n.zeroClosed {
+		close(n.zeroCh)
+		n.zeroClosed = true
+	}
+	n.zeroMu.Unlock()
 }
 
 // Start launches the configured bootstrap service (default "snlua bootstrap").
@@ -463,8 +485,11 @@ func (n *Node) Start() error {
 
 // Wait blocks until all non-reserved actors exit (or ctx is canceled).
 func (n *Node) Wait(ctx context.Context) error {
+	n.zeroMu.Lock()
+	ch := n.zeroCh
+	n.zeroMu.Unlock()
 	select {
-	case <-n.zeroCh:
+	case <-ch:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -479,11 +504,7 @@ func (n *Node) Abort() {
 		a.killCancel()
 		a.Release()
 	}
-	if n.activeActors.Load() == 0 {
-		n.zeroOnce.Do(func() {
-			close(n.zeroCh)
-		})
-	}
+	n.signalZeroIfEmpty()
 }
 
 // Close shuts down the Node, terminating all actors, plugins, workers, monitor, and timer.
@@ -491,9 +512,11 @@ func (n *Node) Close() error {
 	n.closeOnce.Do(func() {
 		n.closed.Store(true)
 
-		// Stop monitor loop first.
-		close(n.stopMonCh)
-		<-n.monDoneCh
+		// Stop monitor loop first (if started).
+		if n.monStarted.Load() {
+			close(n.stopMonCh)
+			<-n.monDoneCh
+		}
 
 		// Stop timer manager before tearing down workers.
 		n.timer.Close()
@@ -565,7 +588,7 @@ func (n *Node) launchInternal(serviceName, param string, reserved bool) (uint32,
 	handle := n.handles.Register(actor)
 	actor.queue = NewMailbox(handle)
 	if !reserved {
-		n.activeActors.Add(1)
+		n.incActiveActors()
 	}
 
 	if err := handler.Init(actor, param); err != nil {
@@ -764,12 +787,14 @@ func (n *Node) SendName(ctx *Actor, source uint32, addr string, msgType int, ses
 	if h == nil {
 		return -1
 	}
-	h.routeGlobal(n, addr, Message{
+	if !h.routeGlobal(n, addr, Message{
 		Source:  source,
 		Session: session,
 		Type:    ptype,
 		Data:    payload,
-	})
+	}) {
+		return -1
+	}
 	return session
 }
 

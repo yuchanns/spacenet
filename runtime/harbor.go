@@ -45,21 +45,35 @@ func (h *localHarborService) Dispatch(actor *Actor, msg *Message) error {
 		h.mu.Unlock()
 
 		for _, qm := range queued {
-			actor.node.pushMessage(msg.Source, qm)
+			if !actor.node.pushMessage(msg.Source, qm) {
+				actor.node.dropMessage(msg.Source, qm)
+			}
 		}
 	}
 	return nil
 }
 
-func (h *localHarborService) routeGlobal(n *Node, name string, msg Message) {
+func (h *localHarborService) routeGlobal(n *Node, name string, msg Message) bool {
 	h.mu.Lock()
+	if h.names == nil {
+		h.mu.Unlock()
+		return false
+	}
 	if dest, ok := h.names[name]; ok && dest != 0 {
 		h.mu.Unlock()
-		n.pushMessage(dest, msg)
-		return
+		if !n.pushMessage(dest, msg) {
+			h.mu.Lock()
+			if h.names != nil && h.names[name] == dest {
+				delete(h.names, name)
+			}
+			h.mu.Unlock()
+			return false
+		}
+		return true
 	}
 	h.pending[name] = append(h.pending[name], msg)
 	h.mu.Unlock()
+	return true
 }
 
 func (h *localHarborService) Signal(_ *Actor, _ int) {}
@@ -67,7 +81,13 @@ func (h *localHarborService) Signal(_ *Actor, _ int) {}
 func (h *localHarborService) Close(actor *Actor) {
 	actor.node.clearHarbor(h)
 	h.mu.Lock()
+	pending := h.pending
 	h.names = nil
 	h.pending = nil
 	h.mu.Unlock()
+	for _, list := range pending {
+		for _, qm := range list {
+			actor.node.dropMessage(0, qm)
+		}
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 
 	"github.com/yuchanns/moelua"
 	"github.com/yuchanns/moelua/vm"
@@ -650,6 +651,9 @@ func unpackOneGo(r *seriReader) (any, error) {
 			v, err := unpackOneGo(r)
 			if err != nil {
 				return nil, err
+			}
+			if !reflect.TypeOf(k).Comparable() {
+				return nil, fmt.Errorf("spacenet: non-comparable Lua table key of type %T", k)
 			}
 			m[k] = v
 		}
