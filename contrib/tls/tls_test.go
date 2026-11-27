@@ -127,6 +127,12 @@ skynet.start(function()
 	local enc2 = server:write("ACK:TLS13")
 	assert(client:read(enc2) == "ACK:TLS13")
 
+	-- Corrupt record followed by trailing bytes must return an error promptly
+	-- rather than blocking forever waiting for bio.inBuf to drain.
+	local badRecord = "\x17\x03\x03\x00\x05BAD!!TRAILING_UNREAD_BYTES"
+	local okBad = pcall(function() server:read(badRecord) end)
+	assert(not okBad, "expected SSL_read error on corrupt record with trailing bytes")
+
 	client:close()
 	server:close()
 	skynet.error("TLS_BIO_OK")

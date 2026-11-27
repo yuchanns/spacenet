@@ -612,7 +612,7 @@ func lTLSRead(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 	sess.mu.Unlock()
 
 	sess.bio.mu.Lock()
-	for !(len(sess.bio.inBuf) == 0 && (sess.bio.waitingRead || sess.readErr != nil || sess.bio.closed)) {
+	for sess.readErr == nil && !sess.bio.closed && !(len(sess.bio.inBuf) == 0 && sess.bio.waitingRead) {
 		sess.bio.cond.Wait()
 	}
 	var out []byte
