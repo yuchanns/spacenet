@@ -1,0 +1,9 @@
+/bin/
+/build/
+/spacenet
+*.exe
+*.out
+*.test
+*.prof
+coverage.txt
+.DS_Store
