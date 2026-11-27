@@ -740,3 +740,210 @@ end)
 	}
 	waitLog(t, logs, "STDIN_FILE_OK")
 }
+
+// TestTCPHalfCloseReadPreservesWriteSide verifies that when a client sends a
+// request and half-closes its write side (CloseWrite), socket.readall returns
+// the full request and the server can still write its response before closing.
+func TestTCPHalfCloseReadPreservesWriteSide(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	customFS := fstest.MapFS{
+		"service/halfclose_srv.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local socket = require "skynet.socket"
+
+skynet.start(function()
+	local port = tonumber(skynet.getenv("hc_port"))
+	local lid = socket.listen("127.0.0.1", port)
+	socket.start(lid, function(fd, addr)
+		socket.start(fd)
+		local req = socket.readall(fd)
+		assert(req == "HALF_CLOSE_REQ", "unexpected req: " .. tostring(req))
+		local ok = socket.write(fd, "HALF_CLOSE_RESP")
+		assert(ok, "write after peer EOF must succeed")
+		socket.close(fd)
+		socket.close(lid)
+		skynet.error("HALFCLOSE_SRV_OK")
+		skynet.exit()
+	end)
+	skynet.error("HALFCLOSE_READY")
+end)
+`)},
+	}
+
+	logs := &syncBuf{}
+	node, err := spacenet.New(
+		spacenet.WithThreads(2),
+		spacenet.WithLogOutput(logs),
+		spacenet.WithContrib(socket.New()),
+		spacenet.WithFS(customFS),
+		spacenet.WithEnv("hc_port", strconv.Itoa(port)),
+		spacenet.WithStart("halfclose_srv"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "HALFCLOSE_READY")
+
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("HALF_CLOSE_REQ")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	resp, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read response after half-close: %v", err)
+	}
+	if string(resp) != "HALF_CLOSE_RESP" {
+		t.Fatalf("unexpected response %q", string(resp))
+	}
+	waitLog(t, logs, "HALFCLOSE_SRV_OK")
+}
+
+// TestUDPConnectTransfersOwnershipToNewService verifies that when a UDP socket
+// is abandoned by one service and passed to another service calling
+// socket.udp_connect(id, host, port, cb), datagrams are delivered to the new owner.
+func TestUDPConnectTransfersOwnershipToNewService(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	echoPort := pc.LocalAddr().(*net.UDPAddr).Port
+
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, rerr := pc.ReadFrom(buf)
+			if rerr != nil {
+				return
+			}
+			_, _ = pc.WriteTo(append([]byte("ECHO:"), buf[:n]...), addr)
+		}
+	}()
+
+	customFS := fstest.MapFS{
+		"service/udp_handoff.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local socket = require "skynet.socket"
+
+local mode, idArg, portArg = ...
+if mode == "receiver" then
+	local id = tonumber(idArg)
+	local port = tonumber(portArg)
+	skynet.start(function()
+		local done = coroutine.running()
+		socket.udp_connect(id, "127.0.0.1", port, function(str)
+			assert(str == "ECHO:HANDOFF_PING", "unexpected udp reply: " .. tostring(str))
+			skynet.wakeup(done)
+		end)
+		socket.write(id, "HANDOFF_PING")
+		skynet.wait(done)
+		socket.close(id)
+		skynet.error("UDP_HANDOFF_OK")
+		skynet.exit()
+	end)
+else
+	skynet.start(function()
+		local port = tonumber(skynet.getenv("udp_echo_port"))
+		local id = socket.udp(function()
+			error("old owner should not receive datagram after handoff")
+		end)
+		socket.abandon(id)
+		skynet.newservice("udp_handoff", "receiver", id, port)
+		skynet.exit()
+	end)
+end
+`)},
+	}
+
+	logs := &syncBuf{}
+	node, err := spacenet.New(
+		spacenet.WithThreads(2),
+		spacenet.WithLogOutput(logs),
+		spacenet.WithContrib(socket.New()),
+		spacenet.WithFS(customFS),
+		spacenet.WithEnv("udp_echo_port", strconv.Itoa(echoPort)),
+		spacenet.WithStart("udp_handoff"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "UDP_HANDOFF_OK")
+}
+
+// TestBindStdinCloseReopenPipe verifies that closing a bound stdin socket stops
+// its reader without consuming input intended for a subsequently reopened socket.stdin().
+func TestBindStdinCloseReopenPipe(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = pr
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		_ = pw.Close()
+		_ = pr.Close()
+	})
+
+	customFS := fstest.MapFS{
+		"service/stdin_reopen.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local socket = require "skynet.socket"
+
+skynet.start(function()
+	local id1 = socket.stdin()
+	socket.close(id1)
+	local id2 = socket.stdin()
+	skynet.error("STDIN_REOPEN_READY")
+	local line = socket.readline(id2, "\n")
+	assert(line == "for-second-stdin", "unexpected line: " .. tostring(line))
+	socket.close(id2)
+	skynet.error("STDIN_REOPEN_OK")
+	skynet.exit()
+end)
+`)},
+	}
+
+	logs := &syncBuf{}
+	node, err := spacenet.New(
+		spacenet.WithThreads(2),
+		spacenet.WithLogOutput(logs),
+		spacenet.WithContrib(socket.New()),
+		spacenet.WithFS(customFS),
+		spacenet.WithStart("stdin_reopen"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "STDIN_REOPEN_READY")
+	if _, err := pw.WriteString("for-second-stdin\n"); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "STDIN_REOPEN_OK")
+}

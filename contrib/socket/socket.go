@@ -99,18 +99,22 @@ type sockEntry struct {
 
 	mu        sync.Mutex
 	owner     uint32
-	conn      net.Conn
-	listener  net.Listener
-	pktConn   net.PacketConn
-	udpPeer   *net.UDPAddr
-	localAddr string
-	peerAddr  string
+	conn         net.Conn
+	listener     net.Listener
+	pktConn      net.PacketConn
+	bindFile     *os.File
+	bindPollable bool
+	bindDone     chan struct{}
+	udpPeer      *net.UDPAddr
+	localAddr    string
+	peerAddr     string
 
 	started       bool
 	readerRunning bool
 	paused        bool
 	pauseCond     *sync.Cond
 	stopCh        chan struct{}
+	readClosed    bool
 	errored       bool
 	closing       bool
 	closed        bool
@@ -135,6 +139,12 @@ type manager struct {
 	mu      sync.RWMutex
 	sockets map[int]*sockEntry
 	closed  atomic.Bool
+
+	stdinMu          sync.Mutex
+	stdinEntry       *sockEntry
+	stdinDone        chan struct{}
+	stdinPumpFile    *os.File
+	stdinPumpRunning bool
 }
 
 func newManager(n *runtime.Node) *manager {
@@ -235,6 +245,33 @@ func (e *sockEntry) failTransport(m *manager, err error) {
 	}
 }
 
+// halfCloseRead reports remote read-side EOF while preserving the socket entry
+// and underlying TCP connection so the owner can flush queued writes or write a
+// final response before closing (matching Skynet's SOCKET_TYPE_HALFCLOSE_READ).
+func (e *sockEntry) halfCloseRead(m *manager) {
+	e.mu.Lock()
+	if e.closed || e.readClosed {
+		e.mu.Unlock()
+		return
+	}
+	e.readClosed = true
+	owner := e.owner
+	sendClose := !e.closeSent
+	if sendClose {
+		e.closeSent = true
+	}
+	e.mu.Unlock()
+
+	if sendClose {
+		if !m.emit(owner, &SocketEvent{
+			Type: SocketTypeClose,
+			ID:   e.id,
+		}) {
+			e.forceClose(m, false)
+		}
+	}
+}
+
 func (e *sockEntry) forceClose(m *manager, notify bool) {
 	e.mu.Lock()
 	alreadyClosed := e.closed
@@ -245,6 +282,8 @@ func (e *sockEntry) forceClose(m *manager, notify bool) {
 	conn := e.conn
 	ln := e.listener
 	pc := e.pktConn
+	bf := e.bindFile
+	bp := e.bindPollable
 	owner := e.owner
 	sendClose := notify && !e.closeSent
 	if sendClose {
@@ -265,6 +304,16 @@ func (e *sockEntry) forceClose(m *manager, notify bool) {
 		}
 		if pc != nil {
 			_ = pc.Close()
+		}
+		if bf != nil && bp {
+			_ = bf.SetReadDeadline(time.Now())
+		}
+		if e.kind == kindBind {
+			m.stdinMu.Lock()
+			if m.stdinEntry == e {
+				m.stdinEntry = nil
+			}
+			m.stdinMu.Unlock()
 		}
 		m.remove(e.id)
 	}
@@ -488,7 +537,7 @@ func (e *sockEntry) startTCPReader(m *manager) {
 					return
 				}
 				if errors.Is(err, io.EOF) {
-					e.forceClose(m, true)
+					e.halfCloseRead(m)
 				} else {
 					e.failTransport(m, err)
 				}
@@ -958,7 +1007,7 @@ func (m *manager) lStart(s *moelua.State, args []moelua.Value) ([]moelua.Value, 
 		e.mu.Unlock()
 		return nil, nil
 	}
-	if e.errored {
+	if e.errored || e.readClosed {
 		e.mu.Unlock()
 		m.emit(actor.Handle(), &SocketEvent{
 			Type: SocketTypeError,
@@ -1108,10 +1157,33 @@ func (m *manager) lBind(s *moelua.State, args []moelua.Value) ([]moelua.Value, e
 	if stdin == nil {
 		return nil, errors.New("socket.bind: stdin is unavailable")
 	}
-	if _, statErr := stdin.Stat(); statErr != nil {
+	fi, statErr := stdin.Stat()
+	if statErr != nil {
 		return nil, fmt.Errorf("socket.bind: stdin is unreadable: %w", statErr)
 	}
+
+	// Retire any prior bound stdin entry and wait for a pollable reader to finish
+	// before clearing the read deadline for the new socket.
+	m.stdinMu.Lock()
+	prev := m.stdinEntry
+	prevDone := m.stdinDone
+	m.stdinEntry = nil
+	m.stdinDone = nil
+	m.stdinMu.Unlock()
+	if prev != nil {
+		prev.forceClose(m, false)
+	}
+	if prevDone != nil {
+		select {
+		case <-prevDone:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	pollable := stdin.SetReadDeadline(time.Time{}) == nil
 	e := m.allocEntry(kindBind, actor.Handle())
+	e.bindFile = stdin
+	e.bindPollable = pollable
 	owner := actor.Handle()
 
 	if !m.emit(owner, &SocketEvent{
@@ -1123,41 +1195,182 @@ func (m *manager) lBind(s *moelua.State, args []moelua.Value) ([]moelua.Value, e
 		return []moelua.Value{moelua.Int(int64(e.id))}, nil
 	}
 
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, rerr := stdin.Read(buf)
-			e.mu.Lock()
-			closed := e.closed
-			errored := e.errored
-			curOwner := e.owner
-			e.mu.Unlock()
-			if closed || errored {
-				return
-			}
-			if n > 0 {
-				cp := make([]byte, n)
-				copy(cp, buf[:n])
-				if !m.emit(curOwner, &SocketEvent{
-					Type: SocketTypeData,
-					ID:   e.id,
-					UD:   n,
-					Data: cp,
-				}) {
-					e.forceClose(m, false)
+	switch {
+	case pollable:
+		done := make(chan struct{})
+		e.bindDone = done
+		m.stdinMu.Lock()
+		m.stdinEntry = e
+		m.stdinDone = done
+		m.stdinMu.Unlock()
+
+		go func() {
+			defer func() {
+				_ = stdin.SetReadDeadline(time.Time{})
+				close(done)
+			}()
+			buf := make([]byte, 4096)
+			for {
+				e.mu.Lock()
+				closed := e.closed || e.errored
+				e.mu.Unlock()
+				if closed {
+					return
+				}
+				n, rerr := stdin.Read(buf)
+				e.mu.Lock()
+				closed = e.closed || e.errored
+				curOwner := e.owner
+				e.mu.Unlock()
+				if closed {
+					return
+				}
+				if n > 0 {
+					cp := make([]byte, n)
+					copy(cp, buf[:n])
+					if !m.emit(curOwner, &SocketEvent{
+						Type: SocketTypeData,
+						ID:   e.id,
+						UD:   n,
+						Data: cp,
+					}) {
+						e.forceClose(m, false)
+						return
+					}
+				}
+				if rerr != nil {
+					if errors.Is(rerr, os.ErrDeadlineExceeded) {
+						e.mu.Lock()
+						closed = e.closed || e.errored
+						e.mu.Unlock()
+						if closed {
+							return
+						}
+						continue
+					}
+					if errors.Is(rerr, io.EOF) {
+						e.forceClose(m, true)
+					} else {
+						e.failTransport(m, rerr)
+					}
 					return
 				}
 			}
-			if rerr != nil {
-				if errors.Is(rerr, io.EOF) {
-					e.forceClose(m, true)
-				} else {
-					e.failTransport(m, rerr)
+		}()
+
+	case fi.Mode().IsRegular():
+		m.stdinMu.Lock()
+		m.stdinEntry = e
+		m.stdinMu.Unlock()
+
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				e.mu.Lock()
+				closed := e.closed || e.errored
+				e.mu.Unlock()
+				if closed {
+					return
 				}
-				return
+				n, rerr := stdin.Read(buf)
+				e.mu.Lock()
+				closed = e.closed || e.errored
+				curOwner := e.owner
+				e.mu.Unlock()
+				if closed {
+					return
+				}
+				if n > 0 {
+					cp := make([]byte, n)
+					copy(cp, buf[:n])
+					if !m.emit(curOwner, &SocketEvent{
+						Type: SocketTypeData,
+						ID:   e.id,
+						UD:   n,
+						Data: cp,
+					}) {
+						e.forceClose(m, false)
+						return
+					}
+				}
+				if rerr != nil {
+					if errors.Is(rerr, io.EOF) {
+						e.forceClose(m, true)
+					} else {
+						e.failTransport(m, rerr)
+					}
+					return
+				}
 			}
+		}()
+
+	default:
+		// Non-pollable pipe or console (e.g. Windows anonymous pipe): run a single
+		// dispatcher per *os.File so closing and reopening socket.stdin() never
+		// leaves competing readers stealing input from the newer socket.
+		m.stdinMu.Lock()
+		m.stdinEntry = e
+		startPump := !m.stdinPumpRunning || m.stdinPumpFile != stdin
+		if startPump {
+			m.stdinPumpRunning = true
+			m.stdinPumpFile = stdin
 		}
-	}()
+		m.stdinMu.Unlock()
+
+		if startPump {
+			go func(f *os.File) {
+				defer func() {
+					m.stdinMu.Lock()
+					if m.stdinPumpFile == f {
+						m.stdinPumpRunning = false
+						m.stdinPumpFile = nil
+					}
+					m.stdinMu.Unlock()
+				}()
+				buf := make([]byte, 4096)
+				for {
+					if m.closed.Load() {
+						return
+					}
+					n, rerr := f.Read(buf)
+					if m.closed.Load() {
+						return
+					}
+					m.stdinMu.Lock()
+					cur := m.stdinEntry
+					m.stdinMu.Unlock()
+					if cur != nil && cur.bindFile == f {
+						cur.mu.Lock()
+						closed := cur.closed || cur.errored
+						curOwner := cur.owner
+						cur.mu.Unlock()
+						if !closed && n > 0 {
+							cp := make([]byte, n)
+							copy(cp, buf[:n])
+							if !m.emit(curOwner, &SocketEvent{
+								Type: SocketTypeData,
+								ID:   cur.id,
+								UD:   n,
+								Data: cp,
+							}) {
+								cur.forceClose(m, false)
+							}
+						}
+						if !closed && rerr != nil {
+							if errors.Is(rerr, io.EOF) {
+								cur.forceClose(m, true)
+							} else {
+								cur.failTransport(m, rerr)
+							}
+						}
+					}
+					if rerr != nil {
+						return
+					}
+				}
+			}(stdin)
+		}
+	}
 	return []moelua.Value{moelua.Int(int64(e.id))}, nil
 }
 
@@ -1190,6 +1403,10 @@ func (m *manager) lUDP(s *moelua.State, args []moelua.Value) ([]moelua.Value, er
 }
 
 func (m *manager) lUDPConnect(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	_, actor, err := managerFromState(s)
+	if err != nil {
+		return nil, err
+	}
 	if len(args) < 2 {
 		return nil, errors.New("udp_connect requires (id, addr [, port])")
 	}
@@ -1207,6 +1424,7 @@ func (m *manager) lUDPConnect(s *moelua.State, args []moelua.Value) ([]moelua.Va
 		return nil, errors.New("udp connect failed: invalid socket")
 	}
 	e.mu.Lock()
+	e.owner = actor.Handle()
 	e.udpPeer = raddr
 	e.peerAddr = raddr.String()
 	e.mu.Unlock()
