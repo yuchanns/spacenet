@@ -70,6 +70,7 @@ type Actor struct {
 	messageCount atomic.Uint64
 	cpuCostNS    atomic.Int64
 	cpuStartNS   atomic.Int64
+	memUsage     atomic.Int64
 
 	logMu   sync.Mutex
 	logfile *os.File
@@ -84,6 +85,8 @@ func (a *Actor) Node() *Node                 { return a.node }
 func (a *Actor) Borrow() *DispatchBorrow     { return &a.borrow }
 func (a *Actor) Context() context.Context    { return a.killCtx }
 func (a *Actor) InterruptFlag() *atomic.Bool { return &a.sig0Flag }
+func (a *Actor) MemoryUsage() int64          { return a.memUsage.Load() }
+func (a *Actor) SetMemoryUsage(bytes int64)  { a.memUsage.Store(bytes) }
 
 func (a *Actor) grab() {
 	a.ref.Add(1)
@@ -357,6 +360,20 @@ func (n *Node) VFS() *LayeredFS          { return n.vfs }
 func (n *Node) CodeCache() *CodeCache    { return n.cache }
 func (n *Node) LogOutput() io.Writer     { return n.logOutput }
 func (n *Node) ActiveActors() int64      { return n.activeActors.Load() }
+
+// MemoryInfo returns the last recorded Lua VM memory usage (in bytes) for every
+// live actor in the Node that has reported memory usage.
+func (n *Node) MemoryInfo() map[uint32]int64 {
+	actors := n.handles.SnapshotAll()
+	out := make(map[uint32]int64, len(actors))
+	for _, a := range actors {
+		if mem := a.MemoryUsage(); mem > 0 {
+			out[a.Handle()] = mem
+		}
+		a.Release()
+	}
+	return out
+}
 
 // Ext retrieves per-Node plugin state by key.
 func (n *Node) Ext(key string) any {

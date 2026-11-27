@@ -81,6 +81,16 @@ MANIFEST = {
         "service/clustersender.lua",
         "service/clusterproxy.lua",
     ],
+    "contrib/debug/lua": [
+        "lualib/skynet/inject.lua",
+        "lualib/skynet/injectcode.lua",
+        "lualib/skynet/remotedebug.lua",
+        "service/cmemory.lua",
+        "service/console.lua",
+        "service/dbg.lua",
+        "service/debug_agent.lua",
+        "service/debug_console.lua",
+    ],
 }
 
 
