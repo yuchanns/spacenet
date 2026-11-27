@@ -84,7 +84,12 @@ func NewHandler(node *spacenet.Node, target string, opts ...HandlerOption) stdht
 		}
 		hdrs := make(map[string]any, len(r.Header))
 		for k, vals := range r.Header {
-			hdrs[strings.ToLower(k)] = strings.Join(vals, ", ")
+			lk := strings.ToLower(k)
+			if lk == "cookie" {
+				hdrs[lk] = strings.Join(vals, "; ")
+			} else {
+				hdrs[lk] = strings.Join(vals, ", ")
+			}
 		}
 		req := map[string]any{
 			"method":  r.Method,

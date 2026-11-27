@@ -66,7 +66,8 @@ local websocket = require "http.websocket"
 skynet.start(function()
 	-- 1. Register Go net/http.Handler bridge target
 	skynet.dispatch("lua", function(session, source, req)
-		skynet.retpack(201, "lua-handled:" .. req.method .. ":" .. req.path .. ":" .. req.body, {
+		local cookie = req.headers and req.headers["cookie"] or ""
+		skynet.retpack(201, "lua-handled:" .. req.method .. ":" .. req.path .. ":" .. req.body .. ":" .. cookie, {
 			["Content-Type"] = "text/plain",
 			["X-Actor"] = "spacenet",
 			["Set-Cookie"] = { "a=1", "b=2" },
@@ -148,7 +149,14 @@ end)
 	bridgeSrv := httptest.NewServer(httpContrib.NewHandler(node, ".web_bridge", httpContrib.WithMaxBodyBytes(32)))
 	defer bridgeSrv.Close()
 
-	resp, err := stdhttp.Post(bridgeSrv.URL+"/api/items", "text/plain", strings.NewReader("payload42"))
+	req, err := stdhttp.NewRequest(stdhttp.MethodPost, bridgeSrv.URL+"/api/items", strings.NewReader("payload42"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Add("Cookie", "session=abc")
+	req.Header.Add("Cookie", "theme=dark")
+	resp, err := stdhttp.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +171,7 @@ end)
 	if cookies := resp.Header.Values("Set-Cookie"); len(cookies) != 2 || cookies[0] != "a=1" || cookies[1] != "b=2" {
 		t.Fatalf("unexpected Set-Cookie headers: %v", cookies)
 	}
-	if string(bodyBytes) != "lua-handled:POST:/api/items:payload42" {
+	if string(bodyBytes) != "lua-handled:POST:/api/items:payload42:session=abc; theme=dark" {
 		t.Fatalf("unexpected bridge body: %q", string(bodyBytes))
 	}
 
