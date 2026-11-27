@@ -3,9 +3,11 @@ go 1.27
 use (
 	.
 	./contrib/crypt
+	./contrib/socket
 )
 
 replace (
 	github.com/yuchanns/spacenet v0.0.0 => .
 	github.com/yuchanns/spacenet/contrib/crypt v0.0.0 => ./contrib/crypt
+	github.com/yuchanns/spacenet/contrib/socket v0.0.0 => ./contrib/socket
 )
