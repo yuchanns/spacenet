@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/yuchanns/moelua"
-	"github.com/yuchanns/spacenet/runtime"
 )
 
 // LoadConfigFile evaluates a Skynet Lua configuration file (supporting Skynet's
@@ -19,28 +18,28 @@ func LoadConfigFile(filename string) (Option, error) {
 	if err != nil {
 		return nil, err
 	}
-	return func(c *runtime.Config) {
-		if c.Env == nil {
-			c.Env = make(map[string]string, len(env))
+	return func(c *nodeConfig) {
+		if c.rt.Env == nil {
+			c.rt.Env = make(map[string]string, len(env))
 		}
 		for k, v := range env {
-			c.Env[k] = v
+			c.rt.Env[k] = v
 		}
 		if t, ok := env["thread"]; ok {
 			if n, err := strconv.Atoi(t); err == nil && n > 0 {
-				c.Threads = n
+				c.rt.Threads = n
 			}
 		}
 		if h, ok := env["harbor"]; ok {
 			if n, err := strconv.Atoi(h); err == nil && n >= 0 && n <= 255 {
-				c.Harbor = uint8(n)
+				c.rt.Harbor = uint8(n)
 			}
 		}
 		if b, ok := env["bootstrap"]; ok && b != "" {
-			c.Bootstrap = b
+			c.rt.Bootstrap = b
 		}
 		if lf, ok := env["logger"]; ok && lf != "" {
-			c.LoggerFile = lf
+			c.rt.LoggerFile = lf
 		}
 	}, nil
 }

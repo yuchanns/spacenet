@@ -1,5 +1,5 @@
 // Package crypt provides Skynet-compatible skynet.crypt, client.crypt, md5.core,
-// and md5 Lua modules in pure Go.
+// and md5 Lua modules.
 package crypt
 
 import (
@@ -11,13 +11,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"math/bits"
 	"time"
 
 	"github.com/yuchanns/moelua"
-	"github.com/yuchanns/spacenet/runtime"
+	"github.com/yuchanns/spacenet/runtime/contrib"
 )
 
 const (
@@ -29,23 +27,14 @@ const (
 	dhGen   uint64 = 5
 )
 
-type contrib struct{}
-
 // New returns the crypt contrib (providing skynet.crypt, client.crypt, md5.core, md5).
-func New() runtime.Contrib { return contrib{} }
-
-func (contrib) Name() string                           { return "crypt" }
-func (contrib) Dependencies() []runtime.Contrib        { return nil }
-func (contrib) InitNode(_ *runtime.Node) (io.Closer, error) { return nil, nil }
-func (contrib) FS() fs.FS                              { return subFS }
-func (contrib) Services() map[string]runtime.ServiceFactory { return nil }
-
-func (contrib) Preloads() map[string]moelua.GoFunc {
-	return map[string]moelua.GoFunc{
-		"skynet.crypt": preloadCrypt,
-		"client.crypt": preloadCrypt,
-		"md5.core":     preloadMD5Core,
-	}
+func New() *contrib.Contrib {
+	return contrib.New("crypt",
+		contrib.WithFS(subFS),
+		contrib.WithPreload("skynet.crypt", preloadCrypt),
+		contrib.WithPreload("client.crypt", preloadCrypt),
+		contrib.WithPreload("md5.core", preloadMD5Core),
+	)
 }
 
 func preloadCrypt(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {

@@ -1,4 +1,4 @@
-// Package spacenet is a modular, pure-Go + MoeLua (Lua 5.5.1) actor runtime
+// Package spacenet is a modular Go + MoeLua (Lua 5.5.1) actor runtime
 // compatible with cloudwu/skynet's Lua APIs.
 //
 // Core spacenet contains zero networking, cryptography, TLS, or legacy harbor
