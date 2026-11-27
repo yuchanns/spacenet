@@ -41,7 +41,7 @@ type Config struct {
 	Bootstrap       string
 	Env             map[string]string
 	FS              []fs.FS
-	Contribs        []Contrib
+	Contribs        []*Contrib
 }
 
 // Actor represents an isolated Skynet service context scheduled on the Node's worker pool.
@@ -336,15 +336,20 @@ func NewNode(cfg Config) (*Node, error) {
 	return n, nil
 }
 
-func resolveContribs(contribs []Contrib) ([]Contrib, error) {
-	byName := make(map[string]Contrib)
-	var collect func(list []Contrib)
-	collect = func(list []Contrib) {
+func resolveContribs(contribs []*Contrib) ([]*Contrib, error) {
+	byName := make(map[string]*Contrib)
+	var collectErr error
+	var collect func(list []*Contrib)
+	collect = func(list []*Contrib) {
 		for _, c := range list {
-			if c == nil {
+			if c == nil || collectErr != nil {
 				continue
 			}
 			name := c.Name()
+			if name == "" {
+				collectErr = errors.New("spacenet: contrib requires a non-empty name")
+				return
+			}
 			if _, exists := byName[name]; exists {
 				continue
 			}
@@ -353,6 +358,9 @@ func resolveContribs(contribs []Contrib) ([]Contrib, error) {
 		}
 	}
 	collect(contribs)
+	if collectErr != nil {
+		return nil, collectErr
+	}
 
 	order := make([]string, 0, len(byName))
 	for name := range byName {
@@ -366,7 +374,7 @@ func resolveContribs(contribs []Contrib) ([]Contrib, error) {
 		visited   = 2
 	)
 	state := make(map[string]int, len(byName))
-	var sorted []Contrib
+	var sorted []*Contrib
 	var visit func(name string) error
 	visit = func(name string) error {
 		switch state[name] {

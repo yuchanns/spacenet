@@ -1,12 +1,5 @@
 package runtime
 
-import (
-	"io"
-	"io/fs"
-
-	"github.com/yuchanns/moelua"
-)
-
 // Skynet protocol type constants (matching skynet-src/skynet.h).
 const (
 	PTypeText      = 0
@@ -55,16 +48,3 @@ type ServiceHandler interface {
 
 // ServiceFactory constructs a fresh ServiceHandler instance on LAUNCH.
 type ServiceFactory func() ServiceHandler
-
-// Contrib extends a spacenet Node with opt-in Lua preload modules, embedded Lua
-// libraries/services, native Go services, and per-Node subsystems.
-// Each contrib lives in its own Go module (github.com/yuchanns/spacenet/contrib/<name>)
-// so callers import and version only what they need.
-type Contrib interface {
-	Name() string
-	Dependencies() []Contrib
-	InitNode(n *Node) (io.Closer, error)
-	Preloads() map[string]moelua.GoFunc
-	FS() fs.FS
-	Services() map[string]ServiceFactory
-}

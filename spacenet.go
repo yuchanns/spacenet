@@ -98,7 +98,7 @@ func WithFS(fsys fs.FS) Option {
 }
 
 // WithContrib enables opt-in Go contrib modules (socket, http, tls, crypt, cluster, share, sproto, debug).
-func WithContrib(contribs ...Contrib) Option {
+func WithContrib(contribs ...*Contrib) Option {
 	return func(c *runtime.Config) {
 		c.Contribs = append(c.Contribs, contribs...)
 	}
