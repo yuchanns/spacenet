@@ -6,58 +6,65 @@ import (
 	"io/fs"
 	"time"
 
+	"github.com/yuchanns/moelua"
 	"github.com/yuchanns/spacenet/runtime"
+	"github.com/yuchanns/spacenet/runtime/contrib"
 )
 
 // Contrib extends a spacenet Node with opt-in Lua modules, services, and subsystems.
-type Contrib = runtime.Contrib
+type Contrib = contrib.Contrib
+
+type nodeConfig struct {
+	rt       runtime.Config
+	contribs []*contrib.Contrib
+}
 
 // Option configures a spacenet Node.
-type Option func(*runtime.Config)
+type Option func(*nodeConfig)
 
 // WithThreads sets the number of bounded actor worker goroutines.
 func WithThreads(n int) Option {
-	return func(c *runtime.Config) { c.Threads = n }
+	return func(c *nodeConfig) { c.rt.Threads = n }
 }
 
 // WithMonitorInterval configures the endless-loop monitor polling interval (default 5s).
 func WithMonitorInterval(d time.Duration) Option {
-	return func(c *runtime.Config) { c.MonitorInterval = d }
+	return func(c *nodeConfig) { c.rt.MonitorInterval = d }
 }
 
 // WithHarbor sets the 8-bit harbor ID (default 0, standalone).
 func WithHarbor(id uint8) Option {
-	return func(c *runtime.Config) { c.Harbor = id }
+	return func(c *nodeConfig) { c.rt.Harbor = id }
 }
 
 // WithJIT enables MoeLua's optional native JIT tier on supported platforms.
 func WithJIT() Option {
-	return func(c *runtime.Config) { c.JIT = true }
+	return func(c *nodeConfig) { c.rt.JIT = true }
 }
 
 // WithBaseDir sets the base directory for resolving relative OS paths.
 func WithBaseDir(dir string) Option {
-	return func(c *runtime.Config) { c.BaseDir = dir }
+	return func(c *nodeConfig) { c.rt.BaseDir = dir }
 }
 
 // WithDisableOSFS prevents Lua loaders from reading files outside mounted fs.FS layers.
 func WithDisableOSFS() Option {
-	return func(c *runtime.Config) { c.DisableOSFS = true }
+	return func(c *nodeConfig) { c.rt.DisableOSFS = true }
 }
 
 // WithLogOutput redirects default logger output to w (defaults to os.Stdout).
 func WithLogOutput(w io.Writer) Option {
-	return func(c *runtime.Config) { c.LogOutput = w }
+	return func(c *nodeConfig) { c.rt.LogOutput = w }
 }
 
 // WithLoggerFile directs the built-in logger service to append to path.
 func WithLoggerFile(path string) Option {
-	return func(c *runtime.Config) { c.LoggerFile = path }
+	return func(c *nodeConfig) { c.rt.LoggerFile = path }
 }
 
 // WithBootstrap overrides the bootstrap service command (default "snlua bootstrap").
 func WithBootstrap(cmd string) Option {
-	return func(c *runtime.Config) { c.Bootstrap = cmd }
+	return func(c *nodeConfig) { c.rt.Bootstrap = cmd }
 }
 
 // WithStart sets the "start" Lua service launched by bootstrap.lua (default "main").
@@ -67,40 +74,40 @@ func WithStart(serviceName string) Option {
 
 // WithEnv sets a single Skynet environment variable accessible via skynet.getenv().
 func WithEnv(key, value string) Option {
-	return func(c *runtime.Config) {
-		if c.Env == nil {
-			c.Env = make(map[string]string)
+	return func(c *nodeConfig) {
+		if c.rt.Env == nil {
+			c.rt.Env = make(map[string]string)
 		}
-		c.Env[key] = value
+		c.rt.Env[key] = value
 	}
 }
 
 // WithEnvMap merges a map of Skynet environment variables.
 func WithEnvMap(m map[string]string) Option {
-	return func(c *runtime.Config) {
-		if c.Env == nil {
-			c.Env = make(map[string]string, len(m))
+	return func(c *nodeConfig) {
+		if c.rt.Env == nil {
+			c.rt.Env = make(map[string]string, len(m))
 		}
 		for k, v := range m {
-			c.Env[k] = v
+			c.rt.Env[k] = v
 		}
 	}
 }
 
 // WithFS mounts an io/fs.FS (e.g., embed.FS or fstest.MapFS) into the Node's
-// LayeredFS ahead of plugin and core embedded assets.
+// LayeredFS ahead of contrib and core embedded assets.
 func WithFS(fsys fs.FS) Option {
-	return func(c *runtime.Config) {
+	return func(c *nodeConfig) {
 		if fsys != nil {
-			c.FS = append(c.FS, fsys)
+			c.rt.FS = append(c.rt.FS, fsys)
 		}
 	}
 }
 
 // WithContrib enables opt-in Go contrib modules (socket, http, tls, crypt, cluster, share, sproto, debug).
 func WithContrib(contribs ...*Contrib) Option {
-	return func(c *runtime.Config) {
-		c.Contribs = append(c.Contribs, contribs...)
+	return func(c *nodeConfig) {
+		c.contribs = append(c.contribs, contribs...)
 	}
 }
 
@@ -112,13 +119,38 @@ type Node struct {
 // New creates and initializes a spacenet Node with the given options.
 // Call Start() to run bootstrap, or Launch() to spawn services directly.
 func New(opts ...Option) (*Node, error) {
-	var cfg runtime.Config
+	var cfg nodeConfig
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&cfg)
 		}
 	}
-	rt, err := runtime.NewNode(cfg)
+	if len(cfg.contribs) > 0 {
+		ordered, err := contrib.Resolve(cfg.contribs)
+		if err != nil {
+			return nil, err
+		}
+		cfg.rt.Preloads = make(map[string]moelua.GoFunc)
+		cfg.rt.Services = make(map[string]runtime.ServiceFactory)
+		for _, c := range ordered {
+			if cfs := c.FS(); cfs != nil {
+				cfg.rt.ContribFS = append(cfg.rt.ContribFS, cfs)
+			}
+			for name, fn := range c.Preloads() {
+				cfg.rt.Preloads[name] = fn
+			}
+			for name, factory := range c.Services() {
+				cfg.rt.Services[name] = factory
+			}
+			if initFn := c.InitFunc(); initFn != nil {
+				cfg.rt.InitHooks = append(cfg.rt.InitHooks, runtime.InitHook{
+					Name: c.Name(),
+					Fn:   initFn,
+				})
+			}
+		}
+	}
+	rt, err := runtime.NewNode(cfg.rt)
 	if err != nil {
 		return nil, err
 	}

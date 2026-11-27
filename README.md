@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/yuchanns/spacenet/actions/workflows/ci.yml/badge.svg)](https://github.com/yuchanns/spacenet/actions/workflows/ci.yml)
 
-A pure-Go implementation of [cloudwu/skynet](https://github.com/cloudwu/skynet) powered by [yuchanns/moelua](https://github.com/yuchanns/moelua) (Lua 5.5.1).
+A Go implementation of [cloudwu/skynet](https://github.com/cloudwu/skynet) powered by [yuchanns/moelua](https://github.com/yuchanns/moelua) (Lua 5.5.1).
 
 ## Quick Start
 

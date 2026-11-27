@@ -1,5 +1,5 @@
 // Package crypt provides Skynet-compatible skynet.crypt, client.crypt, md5.core,
-// and md5 Lua modules in pure Go.
+// and md5 Lua modules.
 package crypt
 
 import (
@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/yuchanns/moelua"
-	"github.com/yuchanns/spacenet/runtime"
+	"github.com/yuchanns/spacenet/runtime/contrib"
 )
 
 const (
@@ -28,12 +28,12 @@ const (
 )
 
 // New returns the crypt contrib (providing skynet.crypt, client.crypt, md5.core, md5).
-func New() *runtime.Contrib {
-	return runtime.NewContrib("crypt",
-		runtime.WithContribFS(subFS),
-		runtime.WithContribPreload("skynet.crypt", preloadCrypt),
-		runtime.WithContribPreload("client.crypt", preloadCrypt),
-		runtime.WithContribPreload("md5.core", preloadMD5Core),
+func New() *contrib.Contrib {
+	return contrib.New("crypt",
+		contrib.WithFS(subFS),
+		contrib.WithPreload("skynet.crypt", preloadCrypt),
+		contrib.WithPreload("client.crypt", preloadCrypt),
+		contrib.WithPreload("md5.core", preloadMD5Core),
 	)
 }
 

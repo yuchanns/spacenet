@@ -146,21 +146,23 @@ func (c closeRecorder) Close() error { c.closed.Store(true); return nil }
 
 func TestInitContribFailureDoesNotDeadlock(t *testing.T) {
 	var firstClosed atomic.Bool
-	first := NewContrib("first", WithContribInit(func(_ *Node) (io.Closer, error) {
-		return closeRecorder{closed: &firstClosed}, nil
-	}))
 	done := make(chan error, 1)
 	go func() {
 		_, err := NewNode(Config{
 			LogOutput: io.Discard,
-			Contribs: []*Contrib{
-				first,
-				NewContrib("failing",
-					WithContribDeps(first),
-					WithContribInit(func(_ *Node) (io.Closer, error) {
+			InitHooks: []InitHook{
+				{
+					Name: "first",
+					Fn: func(_ *Node) (io.Closer, error) {
+						return closeRecorder{closed: &firstClosed}, nil
+					},
+				},
+				{
+					Name: "failing",
+					Fn: func(_ *Node) (io.Closer, error) {
 						return nil, errors.New("boom")
-					}),
-				),
+					},
+				},
 			},
 		})
 		done <- err

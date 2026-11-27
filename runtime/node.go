@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	stdruntime "runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +27,12 @@ var workerWeights = []int{
 	3, 3, 3, 3, 3, 3, 3, 3,
 }
 
+// InitHook registers a per-Node initialization callback (typically supplied by a contrib).
+type InitHook struct {
+	Name string
+	Fn   func(*Node) (io.Closer, error)
+}
+
 // Config configures a spacenet Node.
 type Config struct {
 	Threads         int
@@ -41,7 +46,10 @@ type Config struct {
 	Bootstrap       string
 	Env             map[string]string
 	FS              []fs.FS
-	Contribs        []*Contrib
+	ContribFS       []fs.FS
+	Preloads        map[string]moelua.GoFunc
+	Services        map[string]ServiceFactory
+	InitHooks       []InitHook
 }
 
 // Actor represents an isolated Skynet service context scheduled on the Node's worker pool.
@@ -211,19 +219,10 @@ func NewNode(cfg Config) (*Node, error) {
 		cfg.Bootstrap = "snlua bootstrap"
 	}
 
-	orderedContribs, err := resolveContribs(cfg.Contribs)
-	if err != nil {
-		return nil, err
-	}
-
 	// Build LayeredFS: user FS > contrib FS > core embedded FS.
-	layers := make([]fs.FS, 0, len(cfg.FS)+len(orderedContribs)+1)
+	layers := make([]fs.FS, 0, len(cfg.FS)+len(cfg.ContribFS)+1)
 	layers = append(layers, cfg.FS...)
-	for _, c := range orderedContribs {
-		if cfs := c.FS(); cfs != nil {
-			layers = append(layers, cfs)
-		}
-	}
+	layers = append(layers, cfg.ContribFS...)
 	layers = append(layers, coreassets.FS())
 
 	vfs := NewLayeredFS(cfg.BaseDir, cfg.DisableOSFS, layers...)
@@ -270,13 +269,15 @@ func NewNode(cfg Config) (*Node, error) {
 	n.services["snlua"] = newSnluaService
 	n.services["harbor"] = newLocalHarborService
 
-	// Collect contrib services and preloads.
-	preloads := make(map[string]moelua.GoFunc)
-	for _, c := range orderedContribs {
-		for name, factory := range c.Services() {
+	// Collect configured services and preloads.
+	for name, factory := range cfg.Services {
+		if name != "" && factory != nil {
 			n.services[name] = factory
 		}
-		for name, loader := range c.Preloads() {
+	}
+	preloads := make(map[string]moelua.GoFunc, len(cfg.Preloads))
+	for name, loader := range cfg.Preloads {
+		if name != "" && loader != nil {
 			preloads[name] = loader
 		}
 	}
@@ -306,12 +307,15 @@ func NewNode(cfg Config) (*Node, error) {
 	n.handles.NameHandle(loggerHandle, "logger")
 	n.loggerActor = n.handles.Grab(loggerHandle)
 
-	// Initialize opt-in contribs in dependency order.
-	for _, c := range orderedContribs {
-		closer, err := c.InitNode(n)
+	// Run per-Node initialization hooks in dependency order.
+	for _, hook := range cfg.InitHooks {
+		if hook.Fn == nil {
+			continue
+		}
+		closer, err := hook.Fn(n)
 		if err != nil {
 			n.Close()
-			return nil, fmt.Errorf("spacenet: init contrib %q: %w", c.Name(), err)
+			return nil, fmt.Errorf("spacenet: init contrib %q: %w", hook.Name, err)
 		}
 		if closer != nil {
 			n.contribClosers = append(n.contribClosers, closer)
@@ -334,78 +338,6 @@ func NewNode(cfg Config) (*Node, error) {
 	go n.monitorLoop()
 
 	return n, nil
-}
-
-func resolveContribs(contribs []*Contrib) ([]*Contrib, error) {
-	byName := make(map[string]*Contrib)
-	var collectErr error
-	var collect func(list []*Contrib)
-	collect = func(list []*Contrib) {
-		for _, c := range list {
-			if c == nil || collectErr != nil {
-				continue
-			}
-			name := c.Name()
-			if name == "" {
-				collectErr = errors.New("spacenet: contrib requires a non-empty name")
-				return
-			}
-			if _, exists := byName[name]; exists {
-				continue
-			}
-			byName[name] = c
-			collect(c.Dependencies())
-		}
-	}
-	collect(contribs)
-	if collectErr != nil {
-		return nil, collectErr
-	}
-
-	order := make([]string, 0, len(byName))
-	for name := range byName {
-		order = append(order, name)
-	}
-	sort.Strings(order)
-
-	const (
-		unvisited = 0
-		visiting  = 1
-		visited   = 2
-	)
-	state := make(map[string]int, len(byName))
-	var sorted []*Contrib
-	var visit func(name string) error
-	visit = func(name string) error {
-		switch state[name] {
-		case visited:
-			return nil
-		case visiting:
-			return fmt.Errorf("spacenet: cyclic contrib dependency involving %q", name)
-		}
-		c, ok := byName[name]
-		if !ok {
-			return fmt.Errorf("spacenet: missing required contrib dependency %q", name)
-		}
-		state[name] = visiting
-		for _, dep := range c.Dependencies() {
-			if dep == nil {
-				continue
-			}
-			if err := visit(dep.Name()); err != nil {
-				return err
-			}
-		}
-		state[name] = visited
-		sorted = append(sorted, c)
-		return nil
-	}
-	for _, name := range order {
-		if err := visit(name); err != nil {
-			return nil, err
-		}
-	}
-	return sorted, nil
 }
 
 func (n *Node) Handles() *HandleRegistry { return n.handles }

@@ -1,6 +1,6 @@
 # contrib/crypt
 
-Pure-Go cryptography contrib module for `spacenet`, providing `skynet.crypt`, `client.crypt`, `md5.core`, and `md5`.
+Cryptography contrib module for `spacenet`, providing `skynet.crypt`, `client.crypt`, `md5.core`, and `md5`.
 
 ## Usage
 
@@ -19,4 +19,4 @@ node, err := spacenet.New(
 
 ## License
 
-Apache-2.0
+Apache-2.0 — see [LICENSE](LICENSE).
