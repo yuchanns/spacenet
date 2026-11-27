@@ -99,6 +99,16 @@ func (l *LayeredFS) ReadFile(name string) ([]byte, string, error) {
 	return nil, "", fmt.Errorf("cannot open %s: No such file or directory", name)
 }
 
+// LoadChunkUncached reads filename fresh from LayeredFS and compiles it without
+// consulting or updating CodeCache.
+func (l *LayeredFS) LoadChunkUncached(filename string) (*moelua.Chunk, error) {
+	data, resolvedName, err := l.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	return compileChunkBytes("@"+resolvedName, data)
+}
+
 // SearchPath implements Lua 5.5 package.searchpath(name, path [, sep [, rep]])
 // across OS disk and embedded VFS layers so loader.lua and coroutine-mode
 // skynet.require resolve embedded and disk modules uniformly.

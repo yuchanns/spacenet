@@ -2,7 +2,9 @@ package share_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -58,10 +60,22 @@ skynet.start(function()
 	local t2 = sharetable.query("tbl")
 	assert(t2.hello == "spacenet" and t2.list[3] == 3)
 
-	-- Live hot-update via sharetable.update
+	-- Live hot-update via sharetable.update, including suspended coroutine vararg container
+	local function vararg_holder(...)
+		coroutine.yield("ready")
+		local box = ...
+		return box.cfg.ver, box.cfg.items.a
+	end
+	local co = coroutine.create(vararg_holder)
+	local ok1, st1 = coroutine.resume(co, { cfg = t })
+	assert(ok1 and st1 == "ready")
+
 	sharetable.loadstring("cfg", "return { ver = 2, items = { a = 99 } }")
 	sharetable.update("cfg")
 	assert(t.ver == 2 and t.items.a == 99 and t.items.b == nil, "update failed: ver=" .. tostring(t.ver))
+
+	local ok2, v2, a2 = coroutine.resume(co)
+	assert(ok2 and v2 == 2 and a2 == 99, "suspended coroutine vararg container not updated: " .. tostring(v2) .. "," .. tostring(a2))
 
 	sharetable.loadstring("nilargs", "local a, b = ...; return { a = a == nil, b = b }", nil, 42)
 	local tnil = sharetable.query("nilargs")
@@ -319,6 +333,59 @@ end)
 		case <-closed:
 		case <-time.After(5 * time.Second):
 			t.Fatalf("node.Close() blocked indefinitely on non-terminating sharetable matrix\nlogs:\n%s", hangLogs.String())
+		}
+	})
+
+	t.Run("sharetable_loadfile_bypasses_codecache", func(t *testing.T) {
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "reload_cfg.lua")
+		if err := os.WriteFile(cfgPath, []byte("return { ver = 1 }"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		customFS := fstest.MapFS{
+			"service/st_reload.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
+local skynet = require "skynet"
+local sharetable = require "skynet.sharetable"
+local cfg_path = %q
+
+skynet.start(function()
+	sharetable.loadfile(cfg_path)
+	local t = sharetable.query(cfg_path)
+	assert(t.ver == 1, "expected ver=1, got " .. tostring(t.ver))
+
+	-- Overwrite config file on disk while default codecache mode is ON.
+	local f = assert(io.open(cfg_path, "wb"))
+	f:write("return { ver = 2 }")
+	f:close()
+
+	sharetable.loadfile(cfg_path)
+	sharetable.update(cfg_path)
+	assert(t.ver == 2, "expected reloaded ver=2, got " .. tostring(t.ver))
+
+	skynet.error("SHARETABLE_RELOAD_OK")
+	skynet.exit()
+end)
+`, filepath.ToSlash(cfgPath)))},
+		}
+		logs := &syncBuf{}
+		node, err := spacenet.New(
+			spacenet.WithThreads(4),
+			spacenet.WithLogOutput(logs),
+			spacenet.WithContrib(share.New()),
+			spacenet.WithFS(customFS),
+			spacenet.WithStart("st_reload"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		if err := node.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, logs, "SHARETABLE_RELOAD_OK")
+		if strings.Contains(logs.String(), "error :") {
+			t.Fatalf("sharetable reload test errored:\n%s", logs.String())
 		}
 	})
 

@@ -306,7 +306,7 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 			mL.Close()
 		}()
 		mL.Raw().SetInterruptFlag(actor.InterruptFlag())
-		node.InstallVFSLoaders(mL)
+		node.InstallFreshVFSLoaders(mL)
 		if callerPkg := st.TableOf(st.GetGlobal("package")); callerPkg != nil {
 			if callerPath, ok := st.ToString(callerPkg.GetString("path")); ok && callerPath != "" {
 				if mPkg := mL.TableOf(mL.GetGlobal("package")); mPkg != nil {
@@ -321,7 +321,7 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 
 		var ch *moelua.Chunk
 		if strings.HasPrefix(source, "@") {
-			ch, err = node.CodeCache().LoadChunk(source[1:])
+			ch, err = node.VFS().LoadChunkUncached(source[1:])
 			if err != nil {
 				return nil, err
 			}
@@ -522,11 +522,80 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 		return []moelua.Value{moelua.Bool(!sharedReg.Get(args[0]).IsFalsy())}, nil
 	}))
 
-	_ = tbl.SetString("stackvalues", s.NewFunc("sharetable.stackvalues", func(_ *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	_ = tbl.SetString("stackvalues", s.NewFunc("sharetable.stackvalues", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 		if len(args) < 1 || !args[0].IsThread() {
 			return nil, errors.New("bad argument #1 to 'stackvalues' (thread expected)")
 		}
-		return []moelua.Value{moelua.Int(0)}, nil
+		co := args[0]
+
+		// Matching lualib-src/lua-sharetable.c:lco_stackvalues: return 0 for the
+		// currently running coroutine; otherwise populate args[1] with stack values.
+		if coroTbl := st.TableOf(st.GetGlobal("coroutine")); coroTbl != nil {
+			if runningFn := coroTbl.GetString("running"); !runningFn.IsNil() {
+				if res, err := st.Call(runningFn); err == nil && len(res) > 0 && st.RawEqual(co, res[0]) {
+					return []moelua.Value{moelua.Int(0)}, nil
+				}
+			}
+		}
+		if len(args) < 2 || !args[1].IsTable() {
+			return nil, errors.New("bad argument #2 to 'stackvalues' (table expected)")
+		}
+		out := st.TableOf(args[1])
+
+		dbg := st.TableOf(st.GetGlobal("debug"))
+		if dbg == nil {
+			return []moelua.Value{moelua.Int(0)}, nil
+		}
+		getInfo := dbg.GetString("getinfo")
+		getLocal := dbg.GetString("getlocal")
+		if getInfo.IsNil() || getLocal.IsNil() {
+			return []moelua.Value{moelua.Int(0)}, nil
+		}
+
+		var count int64
+		appendVal := func(v moelua.Value) {
+			if v.IsNil() {
+				return
+			}
+			count++
+			_ = out.SetInt(count, v)
+		}
+
+		whatF := st.String("f")
+		whatFPin := st.Pin(whatF)
+		defer whatFPin.Release()
+
+		for level := int64(0); ; level++ {
+			infoRes, err := st.Call(getInfo, co, moelua.Int(level), whatF)
+			if err != nil || len(infoRes) == 0 || !infoRes[0].IsTable() {
+				break
+			}
+			infoTbl := st.TableOf(infoRes[0])
+			appendVal(infoTbl.GetString("func"))
+
+			// Enumerate all positive local/temporary slots on this frame.
+			for idx := int64(1); ; idx++ {
+				locRes, err := st.Call(getLocal, co, moelua.Int(level), moelua.Int(idx))
+				if err != nil || len(locRes) == 0 || locRes[0].IsNil() {
+					break
+				}
+				if len(locRes) >= 2 {
+					appendVal(locRes[1])
+				}
+			}
+			// Enumerate all negative vararg slots on this frame.
+			for idx := int64(-1); ; idx-- {
+				locRes, err := st.Call(getLocal, co, moelua.Int(level), moelua.Int(idx))
+				if err != nil || len(locRes) == 0 || locRes[0].IsNil() {
+					break
+				}
+				if len(locRes) >= 2 {
+					appendVal(locRes[1])
+				}
+			}
+		}
+
+		return []moelua.Value{moelua.Int(count)}, nil
 	}))
 
 	return []moelua.Value{tbl.Value()}, nil
