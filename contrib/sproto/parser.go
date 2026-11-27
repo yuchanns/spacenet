@@ -447,9 +447,17 @@ func resolveTypeName(types map[string][]astField, parent, name string) (string, 
 	return "", false
 }
 
+const maxInlineSchemaVal = 0x7ffe // largest v such that (v+1)*2 fits in uint16
+
 func (s *astSchema) resolveAndCheck() error {
+	if len(s.types) > maxInlineSchemaVal+1 {
+		return fmt.Errorf("too many sproto types (%d > %d)", len(s.types), maxInlineSchemaVal+1)
+	}
 	protoTags := make(map[int]string, len(s.protocols))
 	for name, pr := range s.protocols {
+		if pr.tag < 0 || pr.tag > maxInlineSchemaVal {
+			return fmt.Errorf("protocol %s tag %d out of range [0, %d]", name, pr.tag, maxInlineSchemaVal)
+		}
 		if _, dup := protoTags[pr.tag]; dup {
 			return fmt.Errorf("redefined protocol tag %d at %s", pr.tag, name)
 		}
@@ -467,6 +475,12 @@ func (s *astSchema) resolveAndCheck() error {
 	}
 	for tname, fields := range s.types {
 		for i := range fields {
+			if fields[i].tag < 0 || fields[i].tag > maxInlineSchemaVal {
+				return fmt.Errorf("field %s.%s tag %d out of range [0, %d]", tname, fields[i].name, fields[i].tag, maxInlineSchemaVal)
+			}
+			if fields[i].hasDecimal && (fields[i].decimal < 0 || fields[i].decimal > 18) {
+				return fmt.Errorf("field %s.%s decimal precision %d out of range [0, 18]", tname, fields[i].name, fields[i].decimal)
+			}
 			full, ok := resolveTypeName(s.types, tname, fields[i].typename)
 			if !ok {
 				return fmt.Errorf("Undefined type %s in type %s", fields[i].typename, tname)

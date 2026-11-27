@@ -155,6 +155,30 @@ ping 2 {
 	local def = sp:default("Person")
 	assert(def.name == "" and def.id == 0 and def.active == false)
 
+	-- Chained __index lookup (object -> class -> base)
+	local base = { number = "999-000", type = 7 }
+	local cls = setmetatable({}, { __index = base })
+	local obj = setmetatable({}, { __index = cls })
+	local chainedDec = sp:decode("Phone", sp:encode("Phone", obj))
+	assert(chainedDec.number == "999-000" and chainedDec.type == 7, "chained __index failed")
+
+	-- Non-table nested struct and struct-array element must error, not silently omit
+	local okNested = pcall(function() sp:encode("Person", { name = "bad", phone = { 17 } }) end)
+	assert(not okNested, "expected error for scalar struct array element")
+	local okSubSchema = sprotoparser.parse [[
+.Child { id 0 : integer }
+.Root { child 0 : Child }
+]]
+	local sp2 = sproto.new(okSubSchema)
+	local okScalarStruct = pcall(function() sp2:encode("Root", { child = 17 }) end)
+	assert(not okScalarStruct, "expected error for scalar nested struct")
+
+	-- Schema inline uint16 tag overflow must be rejected
+	local okTagOverflow = pcall(sprotoparser.parse, ".Bad { x 32768 : integer }")
+	assert(not okTagOverflow, "expected error for overflowing field tag 32768")
+	local okProtoOverflow = pcall(sprotoparser.parse, "badproto 32768 { response nil }")
+	assert(not okProtoOverflow, "expected error for overflowing protocol tag 32768")
+
 	skynet.error("SPROTO_ALL_OK")
 	skynet.exit()
 end)

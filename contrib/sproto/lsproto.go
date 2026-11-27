@@ -460,40 +460,44 @@ func preloadSprotoCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error
 // ---------- Lua <-> Sproto Encoder ----------
 
 func getLuaField(s *moelua.State, raw *vm.State, tblVal moelua.Value, name string) (moelua.Value, error) {
-	if tblVal.IsTable() {
-		t := raw.AsTable(tblVal)
-		if ls, ok := raw.LookupString(name); ok {
-			if v := t.RawGetStr(raw, ls); !v.IsNil() {
-				return v, nil
-			}
-		}
-		if mt := t.Metatable(raw); mt != nil {
-			if idxLs, ok := raw.LookupString("__index"); ok {
-				if idxFn := mt.RawGetStr(raw, idxLs); !idxFn.IsNil() {
-					if idxFn.IsFunction() {
-						return s.Call1(idxFn, tblVal, s.String(name))
-					}
-					if idxFn.IsTable() {
-						if ls, ok := raw.LookupString(name); ok {
-							return raw.AsTable(idxFn).RawGetStr(raw, ls), nil
-						}
-					}
+	const maxIndexLoop = 100
+	cur := tblVal
+	for step := 0; step < maxIndexLoop; step++ {
+		if cur.IsTable() {
+			t := raw.AsTable(cur)
+			if ls, ok := raw.LookupString(name); ok {
+				if v := t.RawGetStr(raw, ls); !v.IsNil() {
+					return v, nil
 				}
 			}
-		}
-		return moelua.Nil(), nil
-	}
-	if idxFn := s.GetMetafield(tblVal, "__index"); !idxFn.IsNil() {
-		if idxFn.IsFunction() {
-			return s.Call1(idxFn, tblVal, s.String(name))
-		}
-		if idxFn.IsTable() {
-			if ls, ok := raw.LookupString(name); ok {
-				return raw.AsTable(idxFn).RawGetStr(raw, ls), nil
+			mt := t.Metatable(raw)
+			if mt == nil {
+				return moelua.Nil(), nil
 			}
+			idxLs, ok := raw.LookupString("__index")
+			if !ok {
+				return moelua.Nil(), nil
+			}
+			idxVal := mt.RawGetStr(raw, idxLs)
+			if idxVal.IsNil() {
+				return moelua.Nil(), nil
+			}
+			if idxVal.IsFunction() {
+				return s.Call1(idxVal, cur, s.String(name))
+			}
+			cur = idxVal
+			continue
 		}
+		idxVal := s.GetMetafield(cur, "__index")
+		if idxVal.IsNil() {
+			return moelua.Nil(), nil
+		}
+		if idxVal.IsFunction() {
+			return s.Call1(idxVal, cur, s.String(name))
+		}
+		cur = idxVal
 	}
-	return moelua.Nil(), nil
+	return moelua.Nil(), errors.New("'__index' chain too long; possible loop")
 }
 
 func appendLenStr(dst []byte, s string) []byte {
@@ -504,6 +508,9 @@ func appendLenStr(dst []byte, s string) []byte {
 func encodeTable(s *moelua.State, tp *Type, tblVal moelua.Value, depth int) ([]byte, error) {
 	if depth >= maxDeepLevel {
 		return nil, errors.New("The table is too deep")
+	}
+	if !tblVal.IsTable() && !(tblVal.IsUserdata() && !s.GetMetafield(tblVal, "__index").IsNil()) {
+		return nil, fmt.Errorf("expected table for struct %s, got %s", tp.Name, tblVal.TypeName())
 	}
 
 	raw := s.Raw()
