@@ -13,7 +13,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      run_sync: ${{ steps.plan.outputs.run_sync }}
+      run_core: ${{ steps.plan.outputs.run_core }}
+      run_cmd: ${{ steps.plan.outputs.run_cmd }}
+      has_contribs: ${{ steps.plan.outputs.has_contribs }}
+      contribs: ${{ steps.plan.outputs.contribs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute affected test plan
+        id: plan
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/plan.py
+
   verify-sync:
+    needs: plan
+    if: needs.plan.outputs.run_sync == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +45,9 @@ jobs:
       - name: Verify embedded Lua files match third_party/skynet
         run: python3 scripts/sync_skynet_lua.py --check
 
-  test:
+  core:
+    needs: plan
+    if: needs.plan.outputs.run_core == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -39,37 +63,115 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Discover workspace packages
-        id: pkgs
+      - name: Pure-Go build (CGO_ENABLED=0)
         shell: bash
-        run: |
-          MODS=$(awk '{gsub(/\r/, "")} /^[[:space:]]+\.\/[^[:space:]]+[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print $0 "/..."}' go.work | tr '\n' ' ')
-          ALL_PKGS="./... ${MODS}"
-          TEST_PKGS=$(echo "$ALL_PKGS" | sed 's|\./cmd/[^ ]*||g')
-          echo "all=${ALL_PKGS}" >> "$GITHUB_OUTPUT"
-          echo "test=${TEST_PKGS}" >> "$GITHUB_OUTPUT"
-          echo "ALL_PKGS=${ALL_PKGS}"
-          echo "TEST_PKGS=${TEST_PKGS}"
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: Vet core
+        shell: bash
+        run: go vet ./...
+
+      - name: Test core
+        shell: bash
+        run: go test -count=1 -timeout 5m ./...
+
+      - name: Test core without JIT (-tags moeluanojit)
+        shell: bash
+        run: go test -tags moeluanojit -count=1 -timeout 5m ./...
+
+      - name: Test core with -race
+        if: runner.os != 'Windows'
+        shell: bash
+        run: go test -race -count=1 -timeout 5m ./...
+
+  contrib:
+    needs: plan
+    if: needs.plan.outputs.has_contribs == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        contrib: ${{ fromJSON(needs.plan.outputs.contribs) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
 
       - name: Pure-Go build (CGO_ENABLED=0)
         shell: bash
         env:
           CGO_ENABLED: "0"
-        run: go build ${{ steps.pkgs.outputs.all }}
+        run: go build ./contrib/${{ matrix.contrib }}/...
 
-      - name: Vet all workspace modules
+      - name: Vet contrib/${{ matrix.contrib }}
         shell: bash
-        run: go vet ${{ steps.pkgs.outputs.all }}
+        run: go vet ./contrib/${{ matrix.contrib }}/...
 
-      - name: Test all workspace modules
+      - name: Test contrib/${{ matrix.contrib }}
         shell: bash
-        run: go test -count=1 -timeout 5m ${{ steps.pkgs.outputs.test }}
+        run: go test -count=1 -timeout 5m ./contrib/${{ matrix.contrib }}/...
 
-      - name: Test without JIT (-tags moeluanojit)
+      - name: Test contrib/${{ matrix.contrib }} without JIT (-tags moeluanojit)
         shell: bash
-        run: go test -tags moeluanojit -count=1 -timeout 5m ./...
+        run: go test -tags moeluanojit -count=1 -timeout 5m ./contrib/${{ matrix.contrib }}/...
 
-      - name: Test all workspace modules with -race
+      - name: Test contrib/${{ matrix.contrib }} with -race
         if: runner.os != 'Windows'
         shell: bash
-        run: go test -race -count=1 -timeout 5m ${{ steps.pkgs.outputs.test }}
+        run: go test -race -count=1 -timeout 5m ./contrib/${{ matrix.contrib }}/...
+
+  cmd:
+    needs: plan
+    if: needs.plan.outputs.run_cmd == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Pure-Go build (CGO_ENABLED=0)
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./cmd/spacenet/...
+
+      - name: Vet cmd/spacenet
+        shell: bash
+        run: go vet ./cmd/spacenet/...
+
+      - name: Test cmd/spacenet
+        shell: bash
+        run: go test -count=1 -timeout 5m ./cmd/spacenet/...
+
+  ci:
+    needs: [plan, verify-sync, core, contrib, cmd]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        shell: bash
+        run: |
+          for res in "${{ needs.plan.result }}" "${{ needs.verify-sync.result }}" "${{ needs.core.result }}" "${{ needs.contrib.result }}" "${{ needs.cmd.result }}"; do
+            if [[ "$res" != "success" && "$res" != "skipped" ]]; then
+              echo "CI failed: job result was '$res'"
+              exit 1
+            fi
+          done
+          echo "All planned CI jobs succeeded."
