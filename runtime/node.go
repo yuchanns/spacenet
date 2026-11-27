@@ -79,9 +79,11 @@ type Actor struct {
 	sig0Flag   atomic.Bool
 }
 
-func (a *Actor) Handle() uint32       { return a.handle }
-func (a *Actor) Node() *Node          { return a.node }
-func (a *Actor) Borrow() *DispatchBorrow { return &a.borrow }
+func (a *Actor) Handle() uint32              { return a.handle }
+func (a *Actor) Node() *Node                 { return a.node }
+func (a *Actor) Borrow() *DispatchBorrow     { return &a.borrow }
+func (a *Actor) Context() context.Context    { return a.killCtx }
+func (a *Actor) InterruptFlag() *atomic.Bool { return &a.sig0Flag }
 
 func (a *Actor) grab() {
 	a.ref.Add(1)
@@ -107,6 +109,9 @@ func (a *Actor) destroy() {
 		a.handler.Close(a)
 	}
 	a.queue.MarkRelease(a.node.globalQ)
+	a.queue.DrainIfReleased(nil, func(m Message) {
+		a.node.dropMessage(a.handle, m)
+	})
 	if !a.reserved {
 		a.node.decActiveActors()
 	}
@@ -173,6 +178,9 @@ type Node struct {
 
 	extMu sync.RWMutex
 	ext   map[string]any
+
+	dropMu       sync.RWMutex
+	dropHandlers map[uint8]func(*Message)
 
 	contribClosers []io.Closer
 
@@ -255,9 +263,10 @@ func NewNode(cfg Config) (*Node, error) {
 		vfs:        vfs,
 		cache:      cache,
 		env:        envMap,
-		services:   make(map[string]ServiceFactory),
-		ext:        make(map[string]any),
-		logOutput:  cfg.LogOutput,
+		services:     make(map[string]ServiceFactory),
+		ext:          make(map[string]any),
+		dropHandlers: make(map[uint8]func(*Message)),
+		logOutput:    cfg.LogOutput,
 		profileDef: profileDef,
 		zeroCh:     make(chan struct{}),
 		stopMonCh:  make(chan struct{}),
@@ -362,6 +371,27 @@ func (n *Node) SetExt(key string, val any) {
 	n.extMu.Lock()
 	n.ext[key] = val
 	n.extMu.Unlock()
+}
+
+// RegisterDropHandler registers a per-protocol callback invoked when an
+// undelivered or mailbox-dropped message of type ptype is discarded.
+func (n *Node) RegisterDropHandler(ptype uint8, fn func(*Message)) {
+	n.dropMu.Lock()
+	if fn == nil {
+		delete(n.dropHandlers, ptype)
+	} else {
+		n.dropHandlers[ptype] = fn
+	}
+	n.dropMu.Unlock()
+}
+
+func (n *Node) invokeDropHandler(msg *Message) {
+	n.dropMu.RLock()
+	fn := n.dropHandlers[msg.Type]
+	n.dropMu.RUnlock()
+	if fn != nil {
+		fn(msg)
+	}
 }
 
 func (n *Node) GetEnv(key string) (string, bool) {
@@ -632,6 +662,7 @@ func (n *Node) PushTypedMessage(dest uint32, msg Message) bool {
 }
 
 func (n *Node) dropMessage(handle uint32, msg Message) {
+	n.invokeDropHandler(&msg)
 	if msg.OwnedToken != 0 {
 		n.msgs.Free(msg.OwnedToken)
 	}
@@ -647,17 +678,18 @@ func (n *Node) dropMessage(handle uint32, msg Message) {
 // Send delivers a message to destination handle, mirroring skynet_send.
 // Returns session (>= 0), -1 on invalid destination, or -2 on oversized payload.
 func (n *Node) Send(ctx *Actor, source, dest uint32, msgType int, session int32, data []byte) int32 {
+	ptype := uint8(msgType & PTypeMask)
 	if len(data) > MaxMessageSize {
 		src := source
 		if src == 0 && ctx != nil {
 			src = ctx.handle
 		}
 		n.Error(src, "error: The message to %x is too large", dest)
+		n.invokeDropHandler(&Message{Source: src, Session: session, Type: ptype, Data: data})
 		return -2
 	}
 	allocSession := (msgType & PTypeTagAllocSession) != 0
 	needCopy := (msgType & PTypeTagDontCopy) == 0
-	ptype := uint8(msgType & PTypeMask)
 
 	if allocSession && ctx != nil {
 		session = ctx.NewSession()
@@ -668,6 +700,7 @@ func (n *Node) Send(ctx *Actor, source, dest uint32, msgType int, session int32,
 	if dest == 0 {
 		if len(data) > 0 {
 			n.Error(source, "error: Destination address can't be 0")
+			n.invokeDropHandler(&Message{Source: source, Session: session, Type: ptype, Data: data})
 			return -1
 		}
 		return session
@@ -681,12 +714,14 @@ func (n *Node) Send(ctx *Actor, source, dest uint32, msgType int, session int32,
 			payload = data
 		}
 	}
-	if !n.pushMessage(dest, Message{
+	msg := Message{
 		Source:  source,
 		Session: session,
 		Type:    ptype,
 		Data:    payload,
-	}) {
+	}
+	if !n.pushMessage(dest, msg) {
+		n.invokeDropHandler(&msg)
 		return -1
 	}
 	return session
@@ -708,12 +743,23 @@ func (n *Node) clearHarbor(h *localHarborService) {
 
 // SendName resolves addr (":hex", ".localname", or standalone global name) and sends a message.
 func (n *Node) SendName(ctx *Actor, source uint32, addr string, msgType int, session int32, data []byte) int32 {
+	ptype := uint8(msgType & PTypeMask)
 	if len(addr) == 0 {
+		src := source
+		if src == 0 && ctx != nil {
+			src = ctx.handle
+		}
+		n.invokeDropHandler(&Message{Source: src, Session: session, Type: ptype, Data: data})
 		return -1
 	}
 	if addr[0] == ':' || addr[0] == '.' {
 		dest := n.handles.ParseHandle(addr)
 		if dest == 0 {
+			src := source
+			if src == 0 && ctx != nil {
+				src = ctx.handle
+			}
+			n.invokeDropHandler(&Message{Source: src, Session: session, Type: ptype, Data: data})
 			return -1
 		}
 		return n.Send(ctx, source, dest, msgType, session, data)
@@ -726,11 +772,11 @@ func (n *Node) SendName(ctx *Actor, source uint32, addr string, msgType int, ses
 			src = ctx.handle
 		}
 		n.Error(src, "error: The message to %s is too large", addr)
+		n.invokeDropHandler(&Message{Source: src, Session: session, Type: ptype, Data: data})
 		return -2
 	}
 	allocSession := (msgType & PTypeTagAllocSession) != 0
 	needCopy := (msgType & PTypeTagDontCopy) == 0
-	ptype := uint8(msgType & PTypeMask)
 	if allocSession && ctx != nil {
 		session = ctx.NewSession()
 	}
@@ -746,18 +792,21 @@ func (n *Node) SendName(ctx *Actor, source uint32, addr string, msgType int, ses
 			payload = data
 		}
 	}
-	n.harborMu.RLock()
-	h := n.localHarbor
-	n.harborMu.RUnlock()
-	if h == nil {
-		return -1
-	}
-	if !h.routeGlobal(n, addr, Message{
+	msg := Message{
 		Source:  source,
 		Session: session,
 		Type:    ptype,
 		Data:    payload,
-	}) {
+	}
+	n.harborMu.RLock()
+	h := n.localHarbor
+	n.harborMu.RUnlock()
+	if h == nil {
+		n.invokeDropHandler(&msg)
+		return -1
+	}
+	if !h.routeGlobal(n, addr, msg) {
+		n.invokeDropHandler(&msg)
 		return -1
 	}
 	return session
@@ -1000,6 +1049,9 @@ func (n *Node) dispatchQueue(mon *workerMonitor, q *Mailbox, weight int) *Mailbo
 
 	batch := 1
 	for i := 0; i < batch; i++ {
+		if actor.retired.Load() {
+			break
+		}
 		msg, ok := q.Pop()
 		if !ok {
 			actor.Release()

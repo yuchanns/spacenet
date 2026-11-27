@@ -81,26 +81,60 @@ func (n *Node) buildLuaTemplate(pluginPreloads map[string]moelua.GoFunc) (*moelu
 	}
 
 	return moelua.NewTemplate(func(s *moelua.State) error {
-		// Override loadfile, dofile, package.searchpath, and package.searchers[2]
-		// so loader.lua and coroutine-mode skynet.require seamlessly read from
-		// LayeredFS (OS disk > user FS > plugin FS > core embedded FS) + CodeCache.
-		s.RegisterFunc("loadfile", n.luaLoadFile)
-		s.RegisterFunc("dofile", n.luaDoFile)
-
-		pkg := s.TableOf(s.GetGlobal("package"))
-		if pkg != nil {
-			_ = pkg.SetString("searchpath", s.NewFunc("package.searchpath", n.luaSearchPath))
-			searchers := s.TableOf(pkg.GetString("searchers"))
-			if searchers != nil {
-				// Replace Lua file searcher (index 2) with LayeredFS + CodeCache searcher.
-				_ = searchers.SetInt(2, s.NewFunc("spacenet.lua_searcher", n.luaSearcher))
-			}
-		}
+		n.InstallVFSLoaders(s)
 		return nil
 	}, opts...)
 }
 
+// InstallVFSLoaders overrides loadfile, dofile, package.searchpath, and
+// package.searchers[2] on s so Lua code resolves modules and scripts through
+// the Node's LayeredFS and CodeCache.
+func (n *Node) InstallVFSLoaders(s *moelua.State) {
+	n.installVFSLoaders(s, false)
+}
+
+// InstallFreshVFSLoaders installs LayeredFS-backed loadfile, dofile,
+// package.searchpath, and package.searchers[2] on s that bypass CodeCache so
+// explicit config reloads always observe updated files on disk.
+func (n *Node) InstallFreshVFSLoaders(s *moelua.State) {
+	n.installVFSLoaders(s, true)
+}
+
+func (n *Node) installVFSLoaders(s *moelua.State, bypassCache bool) {
+	loadFileFn := n.luaLoadFile
+	doFileFn := n.luaDoFile
+	searchPathFn := n.luaSearchPath
+	searcherFn := n.luaSearcher
+	if bypassCache {
+		loadFileFn = n.luaLoadFileUncached
+		doFileFn = n.luaDoFileUncached
+		searchPathFn = n.luaSearchPathUncached
+		searcherFn = n.luaSearcherUncached
+	}
+
+	s.RegisterFunc("loadfile", loadFileFn)
+	s.RegisterFunc("dofile", doFileFn)
+
+	pkg := s.TableOf(s.GetGlobal("package"))
+	if pkg != nil {
+		_ = pkg.SetString("searchpath", s.NewFunc("package.searchpath", searchPathFn))
+		searchers := s.TableOf(pkg.GetString("searchers"))
+		if searchers != nil {
+			// Replace Lua file searcher (index 2) with LayeredFS searcher.
+			_ = searchers.SetInt(2, s.NewFunc("spacenet.lua_searcher", searcherFn))
+		}
+	}
+}
+
 func (n *Node) luaSearchPath(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearchPathImpl(s, args, false)
+}
+
+func (n *Node) luaSearchPathUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearchPathImpl(s, args, true)
+}
+
+func (n *Node) luaSearchPathImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
 	if len(args) < 2 {
 		return nil, errors.New("bad argument to 'searchpath' (string expected)")
 	}
@@ -126,7 +160,12 @@ func (n *Node) luaSearchPath(s *moelua.State, args []moelua.Value) ([]moelua.Val
 			return nil, errors.New("bad argument #4 to 'searchpath' (string expected)")
 		}
 	}
-	found, errMsg := n.cache.SearchPath(name, pathStr, sep, rep)
+	var found, errMsg string
+	if bypassCache {
+		found, errMsg = n.vfs.SearchPath(name, pathStr, sep, rep)
+	} else {
+		found, errMsg = n.cache.SearchPath(name, pathStr, sep, rep)
+	}
 	if found == "" {
 		return []moelua.Value{moelua.Nil(), s.String(errMsg)}, nil
 	}
@@ -134,6 +173,14 @@ func (n *Node) luaSearchPath(s *moelua.State, args []moelua.Value) ([]moelua.Val
 }
 
 func (n *Node) luaLoadFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaLoadFileImpl(s, args, false)
+}
+
+func (n *Node) luaLoadFileUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaLoadFileImpl(s, args, true)
+}
+
+func (n *Node) luaLoadFileImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
 	if len(args) == 0 || args[0].IsNil() {
 		return []moelua.Value{moelua.Nil(), s.String("loadfile without filename is not supported")}, nil
 	}
@@ -157,7 +204,11 @@ func (n *Node) luaLoadFile(s *moelua.State, args []moelua.Value) ([]moelua.Value
 	var ch *moelua.Chunk
 	var err error
 	if mode == "bt" {
-		ch, err = n.cache.LoadChunk(filename)
+		if bypassCache {
+			ch, err = n.vfs.LoadChunkUncached(filename)
+		} else {
+			ch, err = n.cache.LoadChunk(filename)
+		}
 	} else {
 		data, resolved, rerr := n.vfs.ReadFile(filename)
 		if rerr != nil {
@@ -197,7 +248,15 @@ func (n *Node) luaLoadFile(s *moelua.State, args []moelua.Value) ([]moelua.Value
 }
 
 func (n *Node) luaDoFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	res, err := n.luaLoadFile(s, args)
+	return n.luaDoFileImpl(s, args, false)
+}
+
+func (n *Node) luaDoFileUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaDoFileImpl(s, args, true)
+}
+
+func (n *Node) luaDoFileImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
+	res, err := n.luaLoadFileImpl(s, args, bypassCache)
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +273,14 @@ func (n *Node) luaDoFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, 
 }
 
 func (n *Node) luaSearcher(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearcherImpl(s, args, false)
+}
+
+func (n *Node) luaSearcherUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearcherImpl(s, args, true)
+}
+
+func (n *Node) luaSearcherImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
 	if len(args) < 1 {
 		return nil, errors.New("bad argument #1 to searcher (string expected)")
 	}
@@ -229,11 +296,22 @@ func (n *Node) luaSearcher(s *moelua.State, args []moelua.Value) ([]moelua.Value
 	if !ok {
 		return []moelua.Value{s.String("\n\t'package.path' must be a string")}, nil
 	}
-	filename, errMsg := n.cache.SearchPath(modName, pathStr, ".", "/")
+	var filename, errMsg string
+	if bypassCache {
+		filename, errMsg = n.vfs.SearchPath(modName, pathStr, ".", "/")
+	} else {
+		filename, errMsg = n.cache.SearchPath(modName, pathStr, ".", "/")
+	}
 	if filename == "" {
 		return []moelua.Value{s.String(errMsg)}, nil
 	}
-	ch, err := n.cache.LoadChunk(filename)
+	var ch *moelua.Chunk
+	var err error
+	if bypassCache {
+		ch, err = n.vfs.LoadChunkUncached(filename)
+	} else {
+		ch, err = n.cache.LoadChunk(filename)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error loading module '%s' from file '%s':\n\t%v", modName, filename, err)
 	}
@@ -388,9 +466,7 @@ func (l *snluaService) Dispatch(actor *Actor, msg *Message) error {
 		return nil
 	}
 	if l.cbFn == nil || l.state == nil {
-		if msg.OwnedToken != 0 {
-			actor.node.msgs.Free(msg.OwnedToken)
-		}
+		actor.node.dropMessage(actor.handle, *msg)
 		return nil
 	}
 
@@ -490,6 +566,9 @@ func (l *snluaService) Close(_ *Actor) {
 		l.profTotal = nil
 	}
 	if l.state != nil {
+		// Clear the actor's canceled killCtx before Close so Lua/userdata __gc
+		// finalizers (e.g. datasheet/sharedata/stm cleanup) run during teardown.
+		l.state.SetContext(nil)
 		l.state.Close()
 		l.state = nil
 	}

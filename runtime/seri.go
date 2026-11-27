@@ -82,6 +82,14 @@ func packOneLua(s *moelua.State, raw *vm.State, buf []byte, v moelua.Value, dept
 		tok, _ := ExtractToken(v)
 		buf = append(buf, seriTypeUserdata)
 		return binary.LittleEndian.AppendUint64(buf, tok), nil
+	case v.IsUserdata():
+		if ud := raw.AsUserdata(v); ud != nil {
+			if tc, ok := raw.UserdataData(ud).(TokenCarrier); ok {
+				buf = append(buf, seriTypeUserdata)
+				return binary.LittleEndian.AppendUint64(buf, tc.LightUDToken()), nil
+			}
+		}
+		return nil, fmt.Errorf("Unsupport type %s to serialize", v.TypeName())
 	case v.IsTable():
 		return packTableLua(s, raw, buf, v, raw.AsTable(v), depth+1)
 	default:
