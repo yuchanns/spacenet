@@ -79,9 +79,11 @@ type Actor struct {
 	sig0Flag   atomic.Bool
 }
 
-func (a *Actor) Handle() uint32       { return a.handle }
-func (a *Actor) Node() *Node          { return a.node }
-func (a *Actor) Borrow() *DispatchBorrow { return &a.borrow }
+func (a *Actor) Handle() uint32              { return a.handle }
+func (a *Actor) Node() *Node                 { return a.node }
+func (a *Actor) Borrow() *DispatchBorrow     { return &a.borrow }
+func (a *Actor) Context() context.Context    { return a.killCtx }
+func (a *Actor) InterruptFlag() *atomic.Bool { return &a.sig0Flag }
 
 func (a *Actor) grab() {
 	a.ref.Add(1)

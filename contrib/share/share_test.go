@@ -224,6 +224,98 @@ end)
 		waitLog(t, logs, "SHAREDATA_OK")
 	})
 
+	t.Run("sharetable_shared_func_vfs_and_cancel", func(t *testing.T) {
+		customFS := fstest.MapFS{
+			"lualib/cfg_helper.lua": &fstest.MapFile{Data: []byte(`return { from_require = 100 }`)},
+			"cfg/part.lua":          &fstest.MapFile{Data: []byte(`return { from_dofile = 200 }`)},
+			"cfg/extra.lua":         &fstest.MapFile{Data: []byte(`return { from_loadfile = 300 }`)},
+			"cfg/main.lua": &fstest.MapFile{Data: []byte(`
+local helper = require "cfg_helper"
+local part = dofile("cfg/part.lua")
+local extra = assert(loadfile("cfg/extra.lua"))()
+local f = function(x) return x + 1 end
+return {
+	sum = helper.from_require + part.from_dofile + extra.from_loadfile,
+	fn = f,
+	lookup = { [f] = "value" },
+}
+`)},
+			"service/st_vfs_test.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local sharetable = require "skynet.sharetable"
+
+skynet.start(function()
+	sharetable.loadfile("cfg/main.lua")
+	local t = sharetable.query("cfg/main.lua")
+	assert(t.sum == 600, "unexpected sum: " .. tostring(t.sum))
+	assert(t.fn(41) == 42, "unexpected fn result")
+	assert(t.lookup[t.fn] == "value", "shared function identity was not preserved")
+	skynet.error("SHARETABLE_VFS_FUNC_OK")
+	skynet.exit()
+end)
+`)},
+		}
+		logs := &syncBuf{}
+		node, err := spacenet.New(
+			spacenet.WithThreads(4),
+			spacenet.WithLogOutput(logs),
+			spacenet.WithContrib(share.New()),
+			spacenet.WithFS(customFS),
+			spacenet.WithStart("st_vfs_test"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		if err := node.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, logs, "SHARETABLE_VFS_FUNC_OK")
+		if strings.Contains(logs.String(), "error :") {
+			t.Fatalf("sharetable vfs/func test errored:\n%s", logs.String())
+		}
+
+		// Verify actor cancellation interrupts a non-terminating matrix builder on Close().
+		hangFS := fstest.MapFS{
+			"service/st_hang.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local sharetable = require "skynet.sharetable"
+
+skynet.start(function()
+	skynet.error("STARTING_HANG_MATRIX")
+	sharetable.loadstring("hang", "while true do end")
+end)
+`)},
+		}
+		hangLogs := &syncBuf{}
+		hangNode, err := spacenet.New(
+			spacenet.WithThreads(4),
+			spacenet.WithLogOutput(hangLogs),
+			spacenet.WithContrib(share.New()),
+			spacenet.WithFS(hangFS),
+			spacenet.WithStart("st_hang"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hangNode.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, hangLogs, "STARTING_HANG_MATRIX")
+		time.Sleep(50 * time.Millisecond)
+
+		closed := make(chan struct{})
+		go func() {
+			_ = hangNode.Close()
+			close(closed)
+		}()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("node.Close() blocked indefinitely on non-terminating sharetable matrix\nlogs:\n%s", hangLogs.String())
+		}
+	})
+
 	t.Run("datasheet_releases_superseded_documents", func(t *testing.T) {
 		customFS := fstest.MapFS{
 			"service/ds_gc_child.lua": &fstest.MapFile{Data: []byte(`

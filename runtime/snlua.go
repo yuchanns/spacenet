@@ -81,23 +81,27 @@ func (n *Node) buildLuaTemplate(pluginPreloads map[string]moelua.GoFunc) (*moelu
 	}
 
 	return moelua.NewTemplate(func(s *moelua.State) error {
-		// Override loadfile, dofile, package.searchpath, and package.searchers[2]
-		// so loader.lua and coroutine-mode skynet.require seamlessly read from
-		// LayeredFS (OS disk > user FS > plugin FS > core embedded FS) + CodeCache.
-		s.RegisterFunc("loadfile", n.luaLoadFile)
-		s.RegisterFunc("dofile", n.luaDoFile)
-
-		pkg := s.TableOf(s.GetGlobal("package"))
-		if pkg != nil {
-			_ = pkg.SetString("searchpath", s.NewFunc("package.searchpath", n.luaSearchPath))
-			searchers := s.TableOf(pkg.GetString("searchers"))
-			if searchers != nil {
-				// Replace Lua file searcher (index 2) with LayeredFS + CodeCache searcher.
-				_ = searchers.SetInt(2, s.NewFunc("spacenet.lua_searcher", n.luaSearcher))
-			}
-		}
+		n.InstallVFSLoaders(s)
 		return nil
 	}, opts...)
+}
+
+// InstallVFSLoaders overrides loadfile, dofile, package.searchpath, and
+// package.searchers[2] on s so Lua code resolves modules and scripts through
+// the Node's LayeredFS and CodeCache.
+func (n *Node) InstallVFSLoaders(s *moelua.State) {
+	s.RegisterFunc("loadfile", n.luaLoadFile)
+	s.RegisterFunc("dofile", n.luaDoFile)
+
+	pkg := s.TableOf(s.GetGlobal("package"))
+	if pkg != nil {
+		_ = pkg.SetString("searchpath", s.NewFunc("package.searchpath", n.luaSearchPath))
+		searchers := s.TableOf(pkg.GetString("searchers"))
+		if searchers != nil {
+			// Replace Lua file searcher (index 2) with LayeredFS + CodeCache searcher.
+			_ = searchers.SetInt(2, s.NewFunc("spacenet.lua_searcher", n.luaSearcher))
+		}
+	}
 }
 
 func (n *Node) luaSearchPath(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {

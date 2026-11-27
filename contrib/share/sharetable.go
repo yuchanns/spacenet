@@ -28,15 +28,19 @@ const (
 	stFunc
 )
 
-type stValue struct {
-	kind  stValKind
-	b     bool
-	i     int64
-	f     float64
-	s     string
-	u     uint64
-	tbl   *stTableData
+type stFuncData struct {
 	chunk *moelua.Chunk
+}
+
+type stValue struct {
+	kind stValKind
+	b    bool
+	i    int64
+	f    float64
+	s    string
+	u    uint64
+	tbl  *stTableData
+	fn   *stFuncData
 }
 
 type stKV struct {
@@ -47,6 +51,32 @@ type stKV struct {
 type stTableData struct {
 	entries []stKV
 	approxB int64
+}
+
+type captureState struct {
+	tables map[uintptr]*stTableData
+	funcs  map[uintptr]*stFuncData
+}
+
+type matState struct {
+	s         *moelua.State
+	sharedReg *moelua.Table
+	tables    map[*stTableData]*moelua.Table
+	funcs     map[*stFuncData]moelua.Value
+	pins      []*moelua.Handle
+}
+
+func (m *matState) pin(v moelua.Value) {
+	if h := m.s.Pin(v); h != nil {
+		m.pins = append(m.pins, h)
+	}
+}
+
+func (m *matState) releasePins() {
+	for i := len(m.pins) - 1; i >= 0; i-- {
+		m.pins[i].Release()
+	}
+	m.pins = nil
 }
 
 type matrixState struct {
@@ -70,23 +100,23 @@ func (ms *matrixState) close() {
 	}
 }
 
-func captureTable(s *moelua.State, tbl *moelua.Table, seen map[uintptr]*stTableData) (*stTableData, error) {
+func captureTable(s *moelua.State, tbl *moelua.Table, cs *captureState) (*stTableData, error) {
 	if tbl.Metatable() != nil {
 		return nil, errors.New("Can't share metatable")
 	}
 	id := uintptr(tbl.Value().Ref())
-	if existing, ok := seen[id]; ok {
+	if existing, ok := cs.tables[id]; ok {
 		return existing, nil
 	}
 	out := &stTableData{approxB: 64}
-	seen[id] = out
+	cs.tables[id] = out
 
 	err := tbl.ForEach(func(k, v moelua.Value) error {
-		sk, err := captureVal(s, k, seen)
+		sk, err := captureVal(s, k, cs)
 		if err != nil {
 			return err
 		}
-		sv, err := captureVal(s, v, seen)
+		sv, err := captureVal(s, v, cs)
 		if err != nil {
 			return err
 		}
@@ -100,7 +130,7 @@ func captureTable(s *moelua.State, tbl *moelua.Table, seen map[uintptr]*stTableD
 	return out, nil
 }
 
-func captureVal(s *moelua.State, v moelua.Value, seen map[uintptr]*stTableData) (stValue, error) {
+func captureVal(s *moelua.State, v moelua.Value, cs *captureState) (stValue, error) {
 	switch {
 	case v.IsNil():
 		return stValue{kind: stNil}, nil
@@ -117,12 +147,16 @@ func captureVal(s *moelua.State, v moelua.Value, seen map[uintptr]*stTableData) 
 		tok, _ := runtime.ExtractToken(v)
 		return stValue{kind: stLightUD, u: tok}, nil
 	case v.IsTable():
-		td, err := captureTable(s, s.TableOf(v), seen)
+		td, err := captureTable(s, s.TableOf(v), cs)
 		if err != nil {
 			return stValue{}, err
 		}
 		return stValue{kind: stTable, tbl: td}, nil
 	case v.IsClosure():
+		id := uintptr(v.Ref())
+		if existing, ok := cs.funcs[id]; ok {
+			return stValue{kind: stFunc, fn: existing}, nil
+		}
 		// Verify zero upvalues (matching lua-sharetable.c:39) and dump bytecode chunk.
 		dbg := s.TableOf(s.GetGlobal("debug"))
 		if dbg != nil {
@@ -145,7 +179,9 @@ func captureVal(s *moelua.State, v moelua.Value, seen map[uintptr]*stTableData) 
 				if err != nil {
 					return stValue{}, err
 				}
-				return stValue{kind: stFunc, chunk: ch}, nil
+				fd := &stFuncData{chunk: ch}
+				cs.funcs[id] = fd
+				return stValue{kind: stFunc, fn: fd}, nil
 			}
 		}
 		return stValue{}, errors.New("Invalid type [function]")
@@ -171,27 +207,26 @@ func getSharedRegistry(s *moelua.State) *moelua.Table {
 	return t
 }
 
-func materializeTable(s *moelua.State, td *stTableData, sharedReg *moelua.Table, built map[*stTableData]*moelua.Table) (*moelua.Table, error) {
-	if existing, ok := built[td]; ok {
+func materializeTable(ms *matState, td *stTableData) (*moelua.Table, error) {
+	if existing, ok := ms.tables[td]; ok {
 		return existing, nil
 	}
-	t, err := s.TryNewTable(0, len(td.entries))
+	t, err := ms.s.TryNewTable(0, len(td.entries))
 	if err != nil {
 		return nil, err
 	}
-	h := s.Pin(t.Value())
-	defer h.Release()
-	built[td] = t
-	if sharedReg != nil {
-		_ = sharedReg.Set(t.Value(), moelua.Bool(true))
+	ms.pin(t.Value())
+	ms.tables[td] = t
+	if ms.sharedReg != nil {
+		_ = ms.sharedReg.Set(t.Value(), moelua.Bool(true))
 	}
 	for _, kv := range td.entries {
-		k, err := materializeVal(s, kv.k, sharedReg, built)
+		k, err := materializeVal(ms, kv.k)
 		if err != nil {
 			return nil, err
 		}
-		kh := s.Pin(k)
-		v, err := materializeVal(s, kv.v, sharedReg, built)
+		kh := ms.s.Pin(k)
+		v, err := materializeVal(ms, kv.v)
 		if err != nil {
 			kh.Release()
 			return nil, err
@@ -205,7 +240,7 @@ func materializeTable(s *moelua.State, td *stTableData, sharedReg *moelua.Table,
 	return t, nil
 }
 
-func materializeVal(s *moelua.State, sv stValue, sharedReg *moelua.Table, built map[*stTableData]*moelua.Table) (moelua.Value, error) {
+func materializeVal(ms *matState, sv stValue) (moelua.Value, error) {
 	switch sv.kind {
 	case stNil:
 		return moelua.Nil(), nil
@@ -216,17 +251,26 @@ func materializeVal(s *moelua.State, sv stValue, sharedReg *moelua.Table, built 
 	case stFloat:
 		return moelua.Float(sv.f), nil
 	case stString:
-		return s.TryString(sv.s)
+		return ms.s.TryString(sv.s)
 	case stLightUD:
 		return runtime.LightUDToken(sv.u), nil
 	case stTable:
-		t, err := materializeTable(s, sv.tbl, sharedReg, built)
+		t, err := materializeTable(ms, sv.tbl)
 		if err != nil {
 			return moelua.Nil(), err
 		}
 		return t.Value(), nil
 	case stFunc:
-		return s.Load(sv.chunk)
+		if existing, ok := ms.funcs[sv.fn]; ok {
+			return existing, nil
+		}
+		fn, err := ms.s.Load(sv.fn.chunk)
+		if err != nil {
+			return moelua.Nil(), err
+		}
+		ms.pin(fn)
+		ms.funcs[sv.fn] = fn
+		return fn, nil
 	default:
 		return moelua.Nil(), nil
 	}
@@ -250,9 +294,30 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 			return nil, errors.New("bad argument #1 to 'matrix' (string expected)")
 		}
 
-		// Execute matrix builder in an isolated MoeLua State with VFS loadfile support.
-		mL := moelua.New(moelua.WithNoEnv(), moelua.WithLibs(moelua.LibAll))
-		defer mL.Close()
+		// Execute matrix builder in an isolated MoeLua State with LayeredFS loaders
+		// and actor cancellation/interrupt propagation.
+		mL := moelua.New(
+			moelua.WithNoEnv(),
+			moelua.WithLibs(moelua.LibAll),
+			moelua.WithContext(actor.Context()),
+		)
+		defer func() {
+			mL.SetContext(nil)
+			mL.Close()
+		}()
+		mL.Raw().SetInterruptFlag(actor.InterruptFlag())
+		node.InstallVFSLoaders(mL)
+		if callerPkg := st.TableOf(st.GetGlobal("package")); callerPkg != nil {
+			if callerPath, ok := st.ToString(callerPkg.GetString("path")); ok && callerPath != "" {
+				if mPkg := mL.TableOf(mL.GetGlobal("package")); mPkg != nil {
+					if defPath, ok := mL.ToString(mPkg.GetString("path")); ok && defPath != "" {
+						_ = mPkg.SetString("path", mL.String(callerPath+";"+defPath))
+					} else {
+						_ = mPkg.SetString("path", mL.String(callerPath))
+					}
+				}
+			}
+		}
 
 		var ch *moelua.Chunk
 		if strings.HasPrefix(source, "@") {
@@ -336,8 +401,11 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 		// Pin the returned root table across captureTable, which may invoke
 		// debug.getupvalue / string.dump (triggering post-Call GC steps).
 		rootPin := mL.Pin(res[0])
-		seen := make(map[uintptr]*stTableData)
-		root, err := captureTable(mL, mL.TableOf(res[0]), seen)
+		cs := &captureState{
+			tables: make(map[uintptr]*stTableData),
+			funcs:  make(map[uintptr]*stFuncData),
+		}
+		root, err := captureTable(mL, mL.TableOf(res[0]), cs)
 		rootPin.Release()
 		if err != nil {
 			return nil, err
@@ -427,9 +495,14 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 			return nil, errors.New("matrix pointer not found or closed")
 		}
 		root := v.(*stTableData)
-		sharedReg := getSharedRegistry(st)
-		built := make(map[*stTableData]*moelua.Table)
-		t, err := materializeTable(st, root, sharedReg, built)
+		ms := &matState{
+			s:         st,
+			sharedReg: getSharedRegistry(st),
+			tables:    make(map[*stTableData]*moelua.Table),
+			funcs:     make(map[*stFuncData]moelua.Value),
+		}
+		defer ms.releasePins()
+		t, err := materializeTable(ms, root)
 		if err != nil {
 			return nil, err
 		}
