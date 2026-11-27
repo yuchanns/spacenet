@@ -185,8 +185,10 @@ type Node struct {
 	stopMonCh  chan struct{}
 	monDoneCh  chan struct{}
 	workerWG   sync.WaitGroup
+	lifeMu     sync.RWMutex
 	closeOnce  sync.Once
 	closed     atomic.Bool
+	closeCh    chan struct{}
 }
 
 // NewNode constructs and starts a spacenet Node (logger, timer, worker pool,
@@ -261,6 +263,7 @@ func NewNode(cfg Config) (*Node, error) {
 		zeroCh:     make(chan struct{}),
 		stopMonCh:  make(chan struct{}),
 		monDoneCh:  make(chan struct{}),
+		closeCh:    make(chan struct{}),
 	}
 
 	n.services["logger"] = newLoggerService
@@ -510,7 +513,10 @@ func (n *Node) Abort() {
 // Close shuts down the Node, terminating all actors, plugins, workers, monitor, and timer.
 func (n *Node) Close() error {
 	n.closeOnce.Do(func() {
+		n.lifeMu.Lock()
 		n.closed.Store(true)
+		close(n.closeCh)
+		n.lifeMu.Unlock()
 
 		// Stop monitor loop first (if started).
 		if n.monStarted.Load() {
@@ -585,11 +591,18 @@ func (n *Node) launchInternal(serviceName, param string, reserved bool) (uint32,
 	actor.ref.Store(2) // 1 for HandleRegistry + 1 for this launch call
 	actor.profile.Store(n.profileDef)
 
+	n.lifeMu.RLock()
+	if n.closed.Load() {
+		n.lifeMu.RUnlock()
+		killCancel()
+		return 0, errors.New("spacenet: node is closed")
+	}
 	handle := n.handles.Register(actor)
 	actor.queue = NewMailbox(handle)
 	if !reserved {
 		n.incActiveActors()
 	}
+	n.lifeMu.RUnlock()
 
 	if err := handler.Init(actor, param); err != nil {
 		n.Error(handle, "error: launch %s FAILED: %v", serviceName, err)
@@ -602,6 +615,18 @@ func (n *Node) launchInternal(serviceName, param string, reserved bool) (uint32,
 			n.dropMessage(handle, m)
 		})
 		return 0, err
+	}
+
+	if n.closed.Load() || actor.retired.Load() {
+		if retired := n.handles.Retire(handle); retired != nil {
+			retired.retired.Store(true)
+			retired.Release()
+		}
+		actor.Release()
+		actor.queue.DrainIfReleased(nil, func(m Message) {
+			n.dropMessage(handle, m)
+		})
+		return 0, errors.New("spacenet: node is closed")
 	}
 
 	actor.initDone.Store(true)
@@ -1143,10 +1168,17 @@ func (n *Node) CallLua(ctx context.Context, target string, args ...any) ([]any, 
 		killCancel: killCancel,
 	}
 	actor.ref.Store(2)
+	n.lifeMu.RLock()
+	if n.closed.Load() {
+		n.lifeMu.RUnlock()
+		killCancel()
+		return nil, errors.New("spacenet: node is closed")
+	}
 	handle := n.handles.Register(actor)
 	actor.queue = NewMailbox(handle)
 	actor.initDone.Store(true)
 	n.globalQ.Push(actor.queue)
+	n.lifeMu.RUnlock()
 	defer func() {
 		if retired := n.handles.Retire(handle); retired != nil {
 			retired.retired.Store(true)
@@ -1163,6 +1195,8 @@ func (n *Node) CallLua(ctx context.Context, target string, args ...any) ([]any, 
 	select {
 	case r := <-resCh:
 		return r.vals, r.err
+	case <-n.closeCh:
+		return nil, errors.New("spacenet: node is closed")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

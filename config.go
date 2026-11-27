@@ -58,11 +58,20 @@ local result = {}
 local function getenv(name) return assert(os.getenv(name), [[os.getenv() failed: ]] .. name) end
 local sep = package.config:sub(1,1)
 local current_path = [[.]]..sep
+local function is_abs(p)
+	if p:sub(1,1) == [[/]] or p:sub(1,1) == [[\]] then
+		return true
+	end
+	if p:match([[^[A-Za-z]:[/\]]]) then
+		return true
+	end
+	return false
+end
 local function include(cfg)
 	local last_path = current_path
-	local path, name = cfg:match([[(.*]]..sep..[[)(.*)$]])
+	local path, name = cfg:match([[(.*[/\])(.*)$]])
 	if path then
-		if path:sub(1,1) == sep then
+		if is_abs(path) then
 			current_path = path
 		else
 			current_path = current_path .. path

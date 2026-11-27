@@ -590,17 +590,35 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 		return res[0], nil
 	}
 
+	recordProfilePause := func(raw *vm.State, coVal moelua.Value) {
+		stTbl := raw.AsTable(l.profStart.Value())
+		if sv := stTbl.RawGet(raw, coVal); sv.IsNumber() {
+			diff := profNow() - sv.Float()
+			if diff < 0 {
+				diff = 0
+			}
+			totTbl := raw.AsTable(l.profTotal.Value())
+			prev := 0.0
+			if tv := totTbl.RawGet(raw, coVal); tv.IsNumber() {
+				prev = tv.Float()
+			}
+			_ = totTbl.RawSet(raw, coVal, moelua.Float(prev+diff))
+		}
+	}
+
 	timingResume := func(st *moelua.State, coVal moelua.Value, callArgs []moelua.Value) ([]moelua.Value, error) {
 		raw := st.Raw()
 		if l.profActive == 0 {
 			resumeArgs := make([]moelua.Value, 1+len(callArgs))
 			resumeArgs[0] = coVal
 			copy(resumeArgs[1:], callArgs)
-			return raw.Call(origResume, resumeArgs...)
+			res, err := raw.Call(origResume, resumeArgs...)
+			if l.profActive > 0 {
+				recordProfilePause(raw, coVal)
+			}
+			return res, err
 		}
 		stTbl := raw.AsTable(l.profStart.Value())
-		totTbl := raw.AsTable(l.profTotal.Value())
-
 		if !stTbl.RawGet(raw, coVal).IsNil() {
 			_ = stTbl.RawSet(raw, coVal, moelua.Float(profNow()))
 		}
@@ -610,16 +628,8 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 		copy(resumeArgs[1:], callArgs)
 		res, err := raw.Call(origResume, resumeArgs...)
 
-		if sv := stTbl.RawGet(raw, coVal); sv.IsNumber() {
-			diff := profNow() - sv.Float()
-			if diff < 0 {
-				diff = 0
-			}
-			prev := 0.0
-			if tv := totTbl.RawGet(raw, coVal); tv.IsNumber() {
-				prev = tv.Float()
-			}
-			_ = totTbl.RawSet(raw, coVal, moelua.Float(prev+diff))
+		if l.profActive > 0 {
+			recordProfilePause(raw, coVal)
 		}
 		return res, err
 	}
@@ -674,7 +684,12 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 			return nil, errors.New("bad argument #1 to 'resume' (thread expected)")
 		}
 		if l.profActive == 0 {
-			return st.Raw().Call(origResume, args...)
+			raw := st.Raw()
+			res, err := raw.Call(origResume, args...)
+			if l.profActive > 0 {
+				recordProfilePause(raw, args[0])
+			}
+			return res, err
 		}
 		return timingResume(st, args[0], args[1:])
 	}

@@ -308,3 +308,64 @@ func TestHarborDeliveryFailureToRetiredGlobalService(t *testing.T) {
 		t.Fatalf("SendName to retired global service returned %d, want -1", ret)
 	}
 }
+
+func TestCallLuaUnblocksOnNodeClose(t *testing.T) {
+	n, err := NewNode(Config{Threads: 2, LogOutput: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Service that consumes the message without replying.
+	gotMsg := make(chan struct{}, 1)
+	n.svcMu.Lock()
+	n.services["silent"] = func() ServiceHandler {
+		return &callbackService{onDispatch: func(_ *Actor, _ *Message) {
+			select {
+			case gotMsg <- struct{}{}:
+			default:
+			}
+		}}
+	}
+	n.svcMu.Unlock()
+
+	h, err := n.Launch("silent", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.handles.NameHandle(h, "silent")
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, cerr := n.CallLua(context.Background(), ".silent", "hello")
+		errCh <- cerr
+	}()
+
+	select {
+	case <-gotMsg:
+	case <-time.After(2 * time.Second):
+		t.Fatal("silent service did not receive message")
+	}
+
+	_ = n.Close()
+	select {
+	case cerr := <-errCh:
+		if cerr == nil {
+			t.Fatal("expected CallLua error on node close, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CallLua blocked after Node.Close()")
+	}
+}
+
+type callbackService struct {
+	onDispatch func(*Actor, *Message)
+}
+
+func (c *callbackService) Init(_ *Actor, _ string) error { return nil }
+func (c *callbackService) Dispatch(a *Actor, m *Message) error {
+	if c.onDispatch != nil {
+		c.onDispatch(a, m)
+	}
+	return nil
+}
+func (c *callbackService) Signal(_ *Actor, _ int) {}
+func (c *callbackService) Close(_ *Actor)         {}
