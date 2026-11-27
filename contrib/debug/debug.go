@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	metaDebugChannel = "debugchannel"
-	extKeyDebugState = "spacenet.debug.state"
+	metaDebugChannel  = "debugchannel"
+	regDebugHookTable = "_spacenet_debugchannel_hooks"
+	extKeyDebugState  = "spacenet.debug.state"
 )
 
 type debugNodeState struct {
@@ -85,9 +86,15 @@ func preloadMemory(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 		return []moelua.Value{out.Value()}, nil
 	}))
 	_ = tbl.SetString("info", s.NewFunc("memory.info", func(ls *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-		out := ls.NewTable(0, 1)
+		node := actor.Node()
 		if a, err := runtime.ActorFromState(ls); err == nil {
-			_ = out.SetInt(int64(a.Handle()), moelua.Int(ls.MemoryUsage()))
+			a.SetMemoryUsage(ls.MemoryUsage())
+			node = a.Node()
+		}
+		snapshot := node.MemoryInfo()
+		out := ls.NewTable(0, len(snapshot))
+		for handle, bytes := range snapshot {
+			_ = out.SetInt(int64(handle), moelua.Int(bytes))
 		}
 		return []moelua.Value{out.Value()}, nil
 	}))
@@ -349,16 +356,140 @@ func preloadDebugChannel(s *moelua.State, _ []moelua.Value) ([]moelua.Value, err
 		return []moelua.Value{ud}, nil
 	}))
 	_ = tbl.SetString("release", s.NewFunc("debugchannel.release", lDebugRelease))
-	_ = tbl.SetString("sethook", s.NewFunc("debugchannel.sethook", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-		dbg := st.TableOf(st.GetGlobal("debug"))
-		if dbg == nil {
-			return nil, nil
-		}
-		sh := dbg.GetString("sethook")
-		if sh.IsNil() {
-			return nil, nil
-		}
-		return st.Call(sh, args...)
-	}))
+	_ = tbl.SetString("sethook", s.NewFunc("debugchannel.sethook", lDebugSetHook))
 	return []moelua.Value{tbl.Value()}, nil
+}
+
+func getDebugHookTable(s *moelua.State) *moelua.Table {
+	reg := s.Registry()
+	if reg == nil {
+		return nil
+	}
+	if v := reg.GetString(regDebugHookTable); v.IsTable() {
+		return s.TableOf(v)
+	}
+	t := s.NewTable(0, 4)
+	mt := s.NewTable(0, 1)
+	_ = mt.SetString("__mode", s.String("k"))
+	_ = t.SetMetatable(mt)
+	_ = reg.SetString(regDebugHookTable, t.Value())
+	return t
+}
+
+func currentCoroutine(s *moelua.State) (moelua.Value, error) {
+	coro := s.TableOf(s.GetGlobal("coroutine"))
+	if coro == nil {
+		return moelua.Nil(), errors.New("coroutine library not loaded")
+	}
+	running := coro.GetString("running")
+	if running.IsNil() {
+		return moelua.Nil(), errors.New("coroutine.running not available")
+	}
+	res, err := s.Call(running)
+	if err != nil {
+		return moelua.Nil(), err
+	}
+	if len(res) == 0 {
+		return moelua.Nil(), errors.New("coroutine.running returned no value")
+	}
+	return res[0], nil
+}
+
+// lDebugSetHook mirrors lualib-src/lua-debugchannel.c:db_sethook / hookf:
+// registers a per-thread Lua hook callback in a weak-key registry table and
+// invokes coroutine.yield() whenever the callback returns a truthy value.
+// Because the native hook wrapper does not push a Lua call frame, debug.getinfo(2)
+// inside the callback observes the debugged Lua frame directly. Note that
+// moelua v0.1.0 increments nny inside fireHook, so yielding from a debug hook
+// currently surfaces an explicit C-call boundary error rather than silently
+// skipping breakpoints.
+func lDebugSetHook(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	dbg := st.TableOf(st.GetGlobal("debug"))
+	if dbg == nil {
+		return nil, errors.New("debug library not loaded")
+	}
+	sh := dbg.GetString("sethook")
+	if sh.IsNil() {
+		return nil, errors.New("debug.sethook not available")
+	}
+
+	var targetCo moelua.Value
+	argIdx := 0
+	if len(args) > 0 && args[0].IsThread() {
+		targetCo = args[0]
+		argIdx = 1
+	} else {
+		var err error
+		targetCo, err = currentCoroutine(st)
+		if err != nil {
+			return nil, err
+		}
+	}
+	coPin := st.Pin(targetCo)
+	defer coPin.Release()
+
+	hookTbl := getDebugHookTable(st)
+	if len(args) <= argIdx || args[argIdx].IsNil() {
+		if hookTbl != nil {
+			_ = hookTbl.Set(targetCo, moelua.Nil())
+		}
+		_, err := st.Call(sh, targetCo)
+		return nil, err
+	}
+
+	userFn := args[argIdx]
+	if !userFn.IsFunction() {
+		return nil, errors.New("bad argument to 'sethook' (function expected)")
+	}
+	if len(args) <= argIdx+1 || !args[argIdx+1].IsString() {
+		return nil, errors.New("bad argument to 'sethook' (mask string expected)")
+	}
+	mask := args[argIdx+1]
+	var count moelua.Value
+	hasCount := len(args) > argIdx+2 && !args[argIdx+2].IsNil()
+	if hasCount {
+		count = args[argIdx+2]
+	}
+
+	if hookTbl != nil {
+		_ = hookTbl.Set(targetCo, userFn)
+	}
+
+	wrapper := st.NewFunc("debugchannel.hookf", func(hst *moelua.State, hargs []moelua.Value) ([]moelua.Value, error) {
+		co, err := currentCoroutine(hst)
+		if err != nil {
+			return nil, err
+		}
+		ht := getDebugHookTable(hst)
+		if ht == nil {
+			return nil, nil
+		}
+		fn := ht.Get(co)
+		if fn.IsNil() {
+			return nil, nil
+		}
+		res, err := hst.Call(fn, hargs...)
+		if err != nil {
+			return nil, err
+		}
+		if len(res) > 0 && !res[0].IsFalsy() {
+			coro := hst.TableOf(hst.GetGlobal("coroutine"))
+			if coro != nil {
+				if yieldFn := coro.GetString("yield"); !yieldFn.IsNil() {
+					return hst.Call(yieldFn)
+				}
+			}
+			return nil, errors.New("debugchannel.sethook: attempt to yield from debug hook")
+		}
+		return nil, nil
+	})
+	wrapPin := st.Pin(wrapper)
+	defer wrapPin.Release()
+
+	if hasCount {
+		_, err := st.Call(sh, targetCo, wrapper, mask, count)
+		return nil, err
+	}
+	_, err := st.Call(sh, targetCo, wrapper, mask)
+	return nil, err
 }

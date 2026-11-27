@@ -381,6 +381,7 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 	}
 
 	// Queue the initial launch message to self (must be the first message, matching snlua_init).
+	actor.SetMemoryUsage(s.MemoryUsage())
 	actor.queue.Push(Message{
 		Source:  0,
 		Session: 0,
@@ -527,6 +528,7 @@ func (l *snluaService) checkMemWarning() {
 		return
 	}
 	used := l.state.MemoryUsage()
+	l.actor.SetMemoryUsage(used)
 	if used > l.memReport {
 		for l.memReport < used {
 			l.memReport *= 2

@@ -99,6 +99,46 @@ skynet.start(function()
 	assert(skynet.call(worker, "lua", "prof") == true)
 	assert(mem.profactive(false) == false)
 
+	-- memory.info() reports memory usage across all live services on the node.
+	local minfo = mem.info()
+	assert(minfo[skynet.self()] and minfo[skynet.self()] > 0, "memory.info missing self")
+	assert(minfo[worker] and minfo[worker] > 0, "memory.info missing worker service")
+
+	-- debugchannel.sethook preserves debug.getinfo(2) frame depth and invokes
+	-- coroutine.yield() when the callback returns truthy.
+	local seen_src = nil
+	local function sample_fn()
+		local x = 1
+		return x + 1
+	end
+	local co_cont = coroutine.create(function()
+		dc.sethook(function(ev)
+			if ev == "line" and not seen_src then
+				seen_src = debug.getinfo(2, "S").short_src
+			end
+			return false
+		end, "l")
+		local r = sample_fn()
+		dc.sethook()
+		return r
+	end)
+	local ok_c, res_c = coroutine.resume(co_cont)
+	assert(ok_c and res_c == 2, "sethook falsy path failed: " .. tostring(res_c))
+	assert(seen_src and seen_src:find("dbg_main"), "sethook getinfo(2) wrong frame: " .. tostring(seen_src))
+
+	local ran_past_break = false
+	local co_brk = coroutine.create(function()
+		dc.sethook(function(ev)
+			if ev == "line" then
+				return true
+			end
+		end, "l")
+		local _ = sample_fn()
+		ran_past_break = true
+	end)
+	local ok_b = coroutine.resume(co_brk)
+	assert(not ran_past_break, "sethook must not silently execute past a truthy breakpoint return (ok=" .. tostring(ok_b) .. ")")
+
 	-- Basic channel write/read, single-consumer connect limit, and idempotent release.
 	local w, ptr = dc.create()
 	local r = dc.connect(ptr)
