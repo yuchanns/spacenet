@@ -342,6 +342,8 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 		for i := 1; i < len(args); i++ {
 			a := args[i]
 			switch {
+			case a.IsNil():
+				callArgs = append(callArgs, moelua.Nil())
 			case a.IsBool():
 				callArgs = append(callArgs, moelua.Bool(a.IsTrue()))
 			case a.IsInt():

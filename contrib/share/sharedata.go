@@ -3,12 +3,30 @@ package share
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 
 	"github.com/yuchanns/moelua"
 	"github.com/yuchanns/spacenet/runtime"
 )
+
+func toIntegralKey(v moelua.Value) (int64, bool) {
+	if v.IsInt() {
+		return v.Int(), true
+	}
+	if v.IsFloat() {
+		f := v.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f {
+			return 0, false
+		}
+		if f < -9223372036854775808.0 || f >= 9223372036854775808.0 {
+			return 0, false
+		}
+		return int64(f), true
+	}
+	return 0, false
+}
 
 const metaShareDataCtrl = "confctrl"
 
@@ -114,9 +132,7 @@ func buildSDTable(node *runtime.Node, state *sdRootState, s *moelua.State, tbl *
 		if err != nil {
 			return err
 		}
-		switch {
-		case k.IsInt():
-			ik := k.Int()
+		if ik, ok := toIntegralKey(k); ok {
 			if ik > 0 && ik <= int64(arrLen) {
 				out.arr[ik-1] = sv
 				return nil
@@ -124,14 +140,14 @@ func buildSDTable(node *runtime.Node, state *sdRootState, s *moelua.State, tbl *
 			key := sdKey{isInt: true, i: ik}
 			out.hashIdx[key] = len(out.hash)
 			out.hash = append(out.hash, sdEntry{key: key, val: sv})
-		case k.IsFloat():
+		} else if k.IsFloat() {
 			return fmt.Errorf("Invalid key %f", k.Float())
-		case k.IsString():
+		} else if k.IsString() {
 			ks, _ := s.ToString(k)
 			key := sdKey{isInt: false, s: ks}
 			out.hashIdx[key] = len(out.hash)
 			out.hash = append(out.hash, sdEntry{key: key, val: sv})
-		default:
+		} else {
 			return fmt.Errorf("Invalid key type %s", k.TypeName())
 		}
 		return nil
@@ -307,8 +323,7 @@ func preloadShareDataCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			return nil, nil
 		}
 		k := args[1]
-		if k.IsInt() {
-			ik := k.Int()
+		if ik, ok := toIntegralKey(k); ok {
 			if ik > 0 && ik <= int64(len(t.arr)) {
 				return []moelua.Value{pushSDValue(st, t.arr[ik-1])}, nil
 			}
@@ -351,8 +366,7 @@ func preloadShareDataCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		}
 		k := args[1]
 		var lookupKey sdKey
-		if k.IsInt() {
-			ik := k.Int()
+		if ik, ok := toIntegralKey(k); ok {
 			if ik > 0 && ik <= int64(len(t.arr)) {
 				for i := int(ik); i < len(t.arr); i++ {
 					if t.arr[i].kind != sdKindNil {
