@@ -49,6 +49,15 @@ MANIFEST = {
         "lualib/snax/loginserver.lua",
         "service/gate.lua",
     ],
+    "contrib/http/lua": [
+        "lualib/http/httpd.lua",
+        "lualib/http/httpc.lua",
+        "lualib/http/websocket.lua",
+        "lualib/http/url.lua",
+        "lualib/http/sockethelper.lua",
+        "lualib/http/internal.lua",
+        "lualib/http/tlshelper.lua",
+    ],
 }
 
 
