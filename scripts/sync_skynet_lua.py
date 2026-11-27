@@ -37,6 +37,9 @@ MANIFEST = {
         "service/service_cell.lua",
         "service/snaxd.lua",
     ],
+    "contrib/crypt/lua": [
+        "lualib/md5.lua",
+    ],
 }
 
 
