@@ -4,6 +4,7 @@ use (
 	.
 	./contrib/cluster
 	./contrib/crypt
+	./contrib/debug
 	./contrib/http
 	./contrib/share
 	./contrib/socket
@@ -15,6 +16,7 @@ replace (
 	github.com/yuchanns/spacenet v0.0.0 => .
 	github.com/yuchanns/spacenet/contrib/cluster v0.0.0 => ./contrib/cluster
 	github.com/yuchanns/spacenet/contrib/crypt v0.0.0 => ./contrib/crypt
+	github.com/yuchanns/spacenet/contrib/debug v0.0.0 => ./contrib/debug
 	github.com/yuchanns/spacenet/contrib/http v0.0.0 => ./contrib/http
 	github.com/yuchanns/spacenet/contrib/share v0.0.0 => ./contrib/share
 	github.com/yuchanns/spacenet/contrib/socket v0.0.0 => ./contrib/socket
