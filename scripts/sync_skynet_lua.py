@@ -40,6 +40,15 @@ MANIFEST = {
     "contrib/crypt/lua": [
         "lualib/md5.lua",
     ],
+    "contrib/socket/lua": [
+        "lualib/skynet/socket.lua",
+        "lualib/skynet/socketchannel.lua",
+        "lualib/skynet/dns.lua",
+        "lualib/snax/gateserver.lua",
+        "lualib/snax/msgserver.lua",
+        "lualib/snax/loginserver.lua",
+        "service/gate.lua",
+    ],
 }
 
 
