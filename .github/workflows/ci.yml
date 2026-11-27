@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Verify embedded Lua files match third_party/skynet
+        run: python3 scripts/sync_skynet_lua.py --check
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Discover workspace packages
+        id: pkgs
+        shell: bash
+        run: |
+          MODS=$(awk '{gsub(/\r/, "")} /^[[:space:]]+\.\/[^[:space:]]+[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print $0 "/..."}' go.work | tr '\n' ' ')
+          ALL_PKGS="./... ${MODS}"
+          TEST_PKGS=$(echo "$ALL_PKGS" | sed 's|\./cmd/[^ ]*||g')
+          echo "all=${ALL_PKGS}" >> "$GITHUB_OUTPUT"
+          echo "test=${TEST_PKGS}" >> "$GITHUB_OUTPUT"
+          echo "ALL_PKGS=${ALL_PKGS}"
+          echo "TEST_PKGS=${TEST_PKGS}"
+
+      - name: Pure-Go build (CGO_ENABLED=0)
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: go build ${{ steps.pkgs.outputs.all }}
+
+      - name: Vet all workspace modules
+        shell: bash
+        run: go vet ${{ steps.pkgs.outputs.all }}
+
+      - name: Test all workspace modules
+        shell: bash
+        run: go test -count=1 -timeout 5m ${{ steps.pkgs.outputs.test }}
+
+      - name: Test without JIT (-tags moeluanojit)
+        shell: bash
+        run: go test -tags moeluanojit -count=1 -timeout 5m ./...
+
+      - name: Test all workspace modules with -race
+        if: runner.os != 'Windows'
+        shell: bash
+        run: go test -race -count=1 -timeout 5m ${{ steps.pkgs.outputs.test }}
