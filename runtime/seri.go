@@ -204,6 +204,14 @@ func packTableMetaPairs(s *moelua.State, raw *vm.State, buf []byte, pairsFn, tbl
 	if len(iterRes) > 2 {
 		ctrlVal = iterRes[2]
 	}
+	// Pin iterator state across loop iterations so post-call GC steps cannot
+	// sweep fresh closures/tables returned by custom __pairs metamethods.
+	iterRef := raw.Ref(iterFn)
+	defer raw.Unref(iterRef)
+	stateRef := raw.Ref(stateVal)
+	defer raw.Unref(stateRef)
+	ctrlRef := raw.Ref(ctrlVal)
+	defer func() { raw.Unref(ctrlRef) }()
 	for {
 		pair, err := s.Call(iterFn, stateVal, ctrlVal)
 		if err != nil {
@@ -217,14 +225,19 @@ func packTableMetaPairs(s *moelua.State, raw *vm.State, buf []byte, pairsFn, tbl
 		if len(pair) > 1 {
 			v = pair[1]
 		}
+		kRef := raw.Ref(k)
+		vRef := raw.Ref(v)
 		buf, err = packOneLua(s, raw, buf, k, depth)
+		if err == nil {
+			buf, err = packOneLua(s, raw, buf, v, depth)
+		}
+		raw.Unref(vRef)
 		if err != nil {
+			raw.Unref(kRef)
 			return nil, err
 		}
-		buf, err = packOneLua(s, raw, buf, v, depth)
-		if err != nil {
-			return nil, err
-		}
+		raw.Unref(ctrlRef)
+		ctrlRef = kRef
 		ctrlVal = k
 	}
 	return append(buf, seriTypeNil), nil

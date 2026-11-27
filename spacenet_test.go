@@ -300,3 +300,58 @@ end)
 	}
 	waitForLog(t, logs, "CODECACHE_OK", 5*time.Second)
 }
+
+func TestLoadFileWithEnvAndMetaPairsUnderGCPressure(t *testing.T) {
+	// Generate a multi-function Lua chunk large enough to accumulate significant
+	// GC debt during s.Load(ch), then loadfile(path, "t", env)() repeatedly in a
+	// loop so post-call GC steps fire inside debug.setupvalue.
+	var chunk strings.Builder
+	chunk.WriteString("local M = {}\n")
+	for i := 0; i < 32; i++ {
+		chunk.WriteString("local function f")
+		chunk.WriteString(strings.Repeat("x", 8))
+		chunk.WriteString(string(rune('a'+i%26)) + string(rune('a'+i/26)))
+		chunk.WriteString("(n) return n + 1 end\n")
+	}
+	chunk.WriteString("function M.run(x) local function inner(y) return y * 2 end return inner(x) + tag end\nreturn M\n")
+
+	customFS := fstest.MapFS{
+		"lualib/gc_chunk.lua": &fstest.MapFile{Data: []byte(chunk.String())},
+		"service/gc_pin_test.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+
+skynet.start(function()
+	for i = 1, 40 do
+		local env = setmetatable({ tag = i }, { __index = _G })
+		local m = assert(loadfile("lualib/gc_chunk.lua", "t", env))()
+		assert(m.run(10) == 20 + i)
+	end
+
+	-- Exercise custom __pairs iterator closure + fresh key/value under GC pressure.
+	local proxy = setmetatable({}, {
+		__pairs = function()
+			local n = 0
+			return function(_, prev)
+				n = n + 1
+				if n > 200 then return nil end
+				return "k_" .. n, { v = string.rep("z", 128) }
+			end, {}, nil
+		end,
+	})
+	local msg, sz = skynet.pack(proxy)
+	local unpacked = skynet.unpack(msg, sz)
+	assert(unpacked["k_1"].v == string.rep("z", 128))
+	assert(unpacked["k_200"].v == string.rep("z", 128))
+
+	skynet.error("GC_PIN_OK")
+	skynet.exit()
+end)
+`)},
+	}
+
+	node, logs := newCoreTestNode(t, "gc_pin_test", spacenet.WithFS(customFS))
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, logs, "GC_PIN_OK", 8*time.Second)
+}
