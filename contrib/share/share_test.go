@@ -208,6 +208,101 @@ end
 		}
 	})
 
+	t.Run("multicast_releases_refs_on_killed_subscriber", func(t *testing.T) {
+		customFS := fstest.MapFS{
+			"service/mc_drop.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+require "skynet.manager"
+local mc = require "skynet.multicast"
+local mode, parent = ...
+
+if mode == "sub" then
+	parent = tonumber(parent)
+	skynet.start(function()
+		skynet.dispatch("lua", function(_, _, cmd, channel)
+			if cmd == "init" then
+				local c = mc.new {
+					channel = channel,
+					dispatch = function(_, _, msg)
+						skynet.send(parent, "lua", "got", msg)
+					end
+				}
+				c:subscribe()
+				skynet.retpack(true)
+			elseif cmd == "busy_kill" then
+				-- Hold the worker busy briefly so the published multicast message
+				-- queues in this actor's mailbox, then exit without dispatching it.
+				skynet.retpack(true)
+				skynet.exit()
+			end
+		end)
+	end)
+else
+	skynet.start(function()
+		local got = 0
+		skynet.dispatch("lua", function(_, _, cmd, msg)
+			if cmd == "got" then
+				got = got + 1
+				if got == 2 then
+					skynet.error("MC_SURVIVOR_DONE")
+				end
+			end
+		end)
+		local ch = mc.new()
+		local survivor = skynet.newservice("mc_drop", "sub", skynet.self())
+		local deadBefore = skynet.newservice("mc_drop", "sub", skynet.self())
+		local deadQueued = skynet.newservice("mc_drop", "sub", skynet.self())
+		skynet.call(survivor, "lua", "init", ch.channel)
+		skynet.call(deadBefore, "lua", "init", ch.channel)
+		skynet.call(deadQueued, "lua", "init", ch.channel)
+
+		-- 1. Kill deadBefore without unsubscribing -> redirect fails with -1.
+		skynet.kill(deadBefore)
+		skynet.sleep(5)
+		ch:publish("msg1:" .. string.rep("X", 4096))
+
+		-- 2. Trigger deadQueued to exit concurrently with publish -> dropped from mailbox or failed redirect.
+		skynet.send(deadQueued, "lua", "busy_kill")
+		ch:publish("msg2:" .. string.rep("Y", 4096))
+	end)
+end
+`)},
+		}
+		logs := &syncBuf{}
+		node, err := spacenet.New(
+			spacenet.WithThreads(4),
+			spacenet.WithLogOutput(logs),
+			spacenet.WithContrib(share.New()),
+			spacenet.WithFS(customFS),
+			spacenet.WithStart("mc_drop"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		if err := node.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, logs, "MC_SURVIVOR_DONE")
+		if strings.Contains(logs.String(), "error :") {
+			t.Fatalf("multicast drop test errored:\n%s", logs.String())
+		}
+
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if node.Runtime().Objs().Count(runtime.KindMulticastPkg) == 0 && node.Runtime().Msgs().Count() == 0 {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if pkgs := node.Runtime().Objs().Count(runtime.KindMulticastPkg); pkgs != 0 {
+			t.Fatalf("expected 0 leaked multicast packages after killed subscribers, got %d", pkgs)
+		}
+		if msgs := node.Runtime().Msgs().Count(); msgs != 0 {
+			t.Fatalf("expected 0 leaked multicast payload buffers after killed subscribers, got %d", msgs)
+		}
+	})
+
 	t.Run("sharedata_roundtrip", func(t *testing.T) {
 		customFS := fstest.MapFS{
 			"service/sd_test.lua": &fstest.MapFile{Data: []byte(`

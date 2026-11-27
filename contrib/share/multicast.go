@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 
 	"github.com/yuchanns/moelua"
@@ -15,6 +16,39 @@ type mcPackage struct {
 	dataTok uint64
 	size    uint32
 	pkgTok  uint64
+}
+
+func releaseMulticastPkg(node *runtime.Node, pkgTok uint64) error {
+	v, ok := node.Objs().Get(runtime.KindMulticastPkg, pkgTok)
+	if !ok {
+		return nil
+	}
+	pkg := v.(*mcPackage)
+	rem := pkg.ref.Add(-1)
+	if rem == 0 {
+		node.Objs().Delete(runtime.KindMulticastPkg, pkgTok)
+		node.Msgs().Free(pkg.dataTok)
+	} else if rem < 0 {
+		node.Objs().Delete(runtime.KindMulticastPkg, pkgTok)
+		node.Msgs().Free(pkg.dataTok)
+		return fmt.Errorf("Invalid multicast package reference %d", rem)
+	}
+	return nil
+}
+
+func initMulticastNode(node *runtime.Node) (io.Closer, error) {
+	node.RegisterDropHandler(runtime.PTypeMulticast, func(msg *runtime.Message) {
+		if len(msg.Data) != 8 {
+			return
+		}
+		pkgTok := binary.LittleEndian.Uint64(msg.Data)
+		kind, _, _ := runtime.SplitToken(pkgTok)
+		if kind != runtime.KindMulticastPkg {
+			return
+		}
+		_ = releaseMulticastPkg(node, pkgTok)
+	})
+	return nil, nil
 }
 
 func preloadMulticastCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
@@ -169,20 +203,7 @@ func preloadMulticastCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		if !ok || pkgTok == 0 {
 			return nil, nil
 		}
-		v, ok := node.Objs().Get(runtime.KindMulticastPkg, pkgTok)
-		if !ok {
-			return nil, nil
-		}
-		pkg := v.(*mcPackage)
-		rem := pkg.ref.Add(-1)
-		if rem <= 0 {
-			node.Objs().Delete(runtime.KindMulticastPkg, pkgTok)
-			node.Msgs().Free(pkg.dataTok)
-			if rem < 0 {
-				return nil, fmt.Errorf("Invalid multicast package reference %d", rem)
-			}
-		}
-		return nil, nil
+		return nil, releaseMulticastPkg(node, pkgTok)
 	}))
 
 	_ = tbl.SetString("remote", s.NewFunc("mc.remote", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {

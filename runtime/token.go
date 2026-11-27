@@ -175,6 +175,18 @@ func (r *MsgRegistry) Free(tok uint64) bool {
 	return ok
 }
 
+// Count returns the total number of live buffers across all shards.
+func (r *MsgRegistry) Count() int {
+	n := 0
+	for i := range r.shards {
+		sh := &r.shards[i]
+		sh.mu.Lock()
+		n += len(sh.slots) - len(sh.free)
+		sh.mu.Unlock()
+	}
+	return n
+}
+
 // ObjRegistry is a thread-safe generation-checked table for arbitrary Go objects
 // tagged by TokenKind (used by socket, multicast, share, sproto, debug plugins).
 type objSlot struct {

@@ -466,9 +466,7 @@ func (l *snluaService) Dispatch(actor *Actor, msg *Message) error {
 		return nil
 	}
 	if l.cbFn == nil || l.state == nil {
-		if msg.OwnedToken != 0 {
-			actor.node.msgs.Free(msg.OwnedToken)
-		}
+		actor.node.dropMessage(actor.handle, *msg)
 		return nil
 	}
 

@@ -13,6 +13,7 @@ import (
 func New() *contrib.Contrib {
 	return contrib.New("share",
 		contrib.WithDeps(sproto.New()),
+		contrib.WithInit(initMulticastNode),
 		contrib.WithFS(subFS),
 		contrib.WithPreloads(map[string]moelua.GoFunc{
 			"skynet.multicast.core":  preloadMulticastCore,
