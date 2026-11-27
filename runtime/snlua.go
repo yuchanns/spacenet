@@ -490,6 +490,9 @@ func (l *snluaService) Close(_ *Actor) {
 		l.profTotal = nil
 	}
 	if l.state != nil {
+		// Clear the actor's canceled killCtx before Close so Lua/userdata __gc
+		// finalizers (e.g. datasheet/sharedata/stm cleanup) run during teardown.
+		l.state.SetContext(nil)
 		l.state.Close()
 		l.state = nil
 	}

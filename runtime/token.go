@@ -44,6 +44,13 @@ func LightUDToken(tok uint64) moelua.Value {
 	return vm.LightUDTokenValue(tok)
 }
 
+// TokenCarrier is implemented by full-userdata host values that wrap a
+// cross-actor token so Lua GC finalizers can manage lifetime in the owning
+// actor while skynet.pack serializes the value as a standard lightuserdata token.
+type TokenCarrier interface {
+	LightUDToken() uint64
+}
+
 // ExtractToken extracts the 64-bit token from a Lua lightuserdata Value.
 func ExtractToken(v moelua.Value) (uint64, bool) {
 	if !v.IsLightUD() {
@@ -245,6 +252,19 @@ func (r *ObjRegistry) Delete(expectedKind TokenKind, tok uint64) (any, bool) {
 	}
 	r.free = append(r.free, slot)
 	return val, true
+}
+
+// Count returns the number of live entries of the given TokenKind.
+func (r *ObjRegistry) Count(kind TokenKind) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for i := range r.slots {
+		if r.slots[i].used && r.slots[i].kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // DispatchBorrow holds per-actor transient borrow state active only during a

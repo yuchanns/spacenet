@@ -11,6 +11,7 @@ import (
 
 	"github.com/yuchanns/spacenet"
 	"github.com/yuchanns/spacenet/contrib/share"
+	"github.com/yuchanns/spacenet/runtime"
 )
 
 type syncBuf struct {
@@ -221,5 +222,117 @@ end)
 		defer node.Close()
 		_ = node.Start()
 		waitLog(t, logs, "SHAREDATA_OK")
+	})
+
+	t.Run("datasheet_releases_superseded_documents", func(t *testing.T) {
+		customFS := fstest.MapFS{
+			"service/ds_gc_child.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local datasheet = require "skynet.datasheet"
+
+skynet.start(function()
+	local view = datasheet.query("cfg")
+	assert(view.ver == 1)
+	skynet.exit()
+end)
+`)},
+			"service/ds_gc_consumer.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local datasheet = require "skynet.datasheet"
+
+skynet.start(function()
+	local view = datasheet.query("cfg")
+	local sub = view.sub
+	assert(view.ver == 1 and sub.x == 10)
+	skynet.dispatch("lua", function(_, _, cmd)
+		if cmd == "wait_final" then
+			local deadline = skynet.now() + 300
+			while view.ver ~= 12 and skynet.now() < deadline do
+				skynet.sleep(2)
+			end
+			assert(view.ver == 12 and view.sub.x == 120, "unexpected final view: ver=" .. tostring(view.ver))
+			collectgarbage("collect")
+			skynet.retpack(true)
+		end
+	end)
+end)
+`)},
+			"service/ds_gc_main.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local builder = require "skynet.datasheet.builder"
+
+skynet.start(function()
+	-- Builder + long-lived consumer + transient child consumer (verifying sheets.__gc -> close).
+	builder.new("cfg", { ver = 1, sub = { x = 10 } })
+	skynet.newservice("ds_gc_child")
+	local consumer = skynet.newservice("ds_gc_consumer")
+	skynet.sleep(5)
+
+	for i = 2, 12 do
+		if i == 6 then
+			builder.update("cfg", { ver = i, sub = i * 10 })
+		else
+			builder.update("cfg", { ver = i, sub = { x = i * 10 } })
+		end
+	end
+
+	-- Updates with zero consumers.
+	builder.new("unused", { v = 1 })
+	for i = 2, 10 do
+		builder.update("unused", { v = i })
+	end
+
+	assert(skynet.call(consumer, "lua", "wait_final"))
+
+	skynet.sleep(20)
+	collectgarbage("collect")
+	collectgarbage("collect")
+
+	-- Direct core.stringpointer + core.new: proxy keeps document alive after pointer handle is collected.
+	local core = require "skynet.datasheet.core"
+	local dump = require "skynet.datasheet.dump"
+	local ptr = core.stringpointer(dump.dump({ direct = 77 }))
+	local p = core.new(ptr)
+	ptr = nil
+	collectgarbage("collect")
+	assert(p.direct == 77, "proxy should retain document after pointer handle is collected")
+	p = nil
+	collectgarbage("collect")
+	collectgarbage("collect")
+
+	skynet.error("DATASHEET_GC_OK")
+end)
+`)},
+		}
+		logs := &syncBuf{}
+		node, err := spacenet.New(
+			spacenet.WithThreads(4),
+			spacenet.WithLogOutput(logs),
+			spacenet.WithContrib(share.New()),
+			spacenet.WithFS(customFS),
+			spacenet.WithStart("ds_gc_main"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		if err := node.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, logs, "DATASHEET_GC_OK")
+		if strings.Contains(logs.String(), "error :") {
+			t.Fatalf("datasheet gc test errored:\n%s", logs.String())
+		}
+
+		// Only the latest versions of "cfg" and "unused" should remain live.
+		if got := node.Runtime().Objs().Count(runtime.KindDatasheetDoc); got != 2 {
+			t.Fatalf("expected exactly 2 live datasheet documents after GC, got %d\nlogs:\n%s", got, logs.String())
+		}
+
+		// Closing the node runs remaining Lua finalizers and releases all documents.
+		_ = node.Close()
+		if after := node.Runtime().Objs().Count(runtime.KindDatasheetDoc); after != 0 {
+			t.Fatalf("expected 0 live datasheet documents after node.Close(), got %d", after)
+		}
 	})
 }

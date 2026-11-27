@@ -6,16 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/yuchanns/moelua"
 	"github.com/yuchanns/spacenet/runtime"
 )
 
 const (
-	dsNodeCache  = "_ctable"
-	dsProxyCache = "_proxy"
-	dsTables     = "_ctables"
-	dsProxyMeta  = "_datasheet_proxy_mt"
+	dsNodeCache     = "_ctable"
+	dsProxyCache    = "_proxy"
+	dsProxyMeta     = "_datasheet_proxy_mt"
+	dsProxyUDMeta   = "_datasheet_proxy_ud_mt"
+	dsDocHandleMeta = "_datasheet_doc_mt"
 
 	dsValNil     = 0
 	dsValInteger = 1
@@ -28,12 +30,85 @@ const (
 )
 
 type dsDoc struct {
+	mu   sync.Mutex
+	refs int64
+	tok  uint64
+	node *runtime.Node
 	data []byte
 }
 
+func newDSDoc(node *runtime.Node, data []byte) *dsDoc {
+	d := &dsDoc{
+		refs: 1,
+		node: node,
+		data: data,
+	}
+	d.mu.Lock()
+	d.tok = node.Objs().Put(runtime.KindDatasheetDoc, d)
+	d.mu.Unlock()
+	return d
+}
+
+func (d *dsDoc) token() uint64 {
+	d.mu.Lock()
+	tok := d.tok
+	d.mu.Unlock()
+	return tok
+}
+
+func (d *dsDoc) bytes() []byte {
+	d.mu.Lock()
+	data := d.data
+	d.mu.Unlock()
+	return data
+}
+
+func (d *dsDoc) retain() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.refs <= 0 {
+		return false
+	}
+	d.refs++
+	return true
+}
+
+func (d *dsDoc) release() {
+	d.mu.Lock()
+	if d.refs <= 0 {
+		d.mu.Unlock()
+		return
+	}
+	d.refs--
+	dead := d.refs == 0
+	tok := d.tok
+	if dead {
+		d.data = nil
+	}
+	d.mu.Unlock()
+	if dead && tok != 0 {
+		d.node.Objs().Delete(runtime.KindDatasheetDoc, tok)
+	}
+}
+
+// dsDocHandle wraps a dsDoc owned by the builder actor. It implements
+// runtime.TokenCarrier so skynet.pack serializes it as a cross-actor
+// lightuserdata token while Lua GC releases the document once builder.lua's
+// collection monitor drops it from its cache.
+type dsDocHandle struct {
+	doc *dsDoc
+}
+
+func (h *dsDocHandle) LightUDToken() uint64 {
+	if h.doc == nil {
+		return 0
+	}
+	return h.doc.token()
+}
+
 type dsProxy struct {
-	docTok uint64
-	index  int
+	doc   *dsDoc
+	index int
 }
 
 func dsCacheKey(docTok uint64, index int) string {
@@ -75,6 +150,17 @@ func dsReadCString(doc []byte, strtbl uint32, off uint32) string {
 	return string(rest)
 }
 
+func extractDocToken(st *moelua.State, v moelua.Value) (uint64, bool) {
+	if tok, ok := runtime.ExtractToken(v); ok {
+		return tok, tok != 0
+	}
+	if data, ok := st.CheckUserdata(v, dsDocHandleMeta); ok {
+		tok := data.(*dsDocHandle).LightUDToken()
+		return tok, tok != 0
+	}
+	return 0, false
+}
+
 func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 	actor, err := runtime.ActorFromState(s)
 	if err != nil {
@@ -97,48 +183,105 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 	if !reg.GetString(dsProxyCache).IsTable() {
 		_ = reg.SetString(dsProxyCache, newWeak(s, "k").Value())
 	}
-	if !reg.GetString(dsTables).IsTable() {
-		_ = reg.SetString(dsTables, s.NewTable(0, 8).Value())
+
+	docHandleMT, created := s.NewMetatable(dsDocHandleMeta)
+	if created {
+		_ = docHandleMT.SetString("__gc", s.NewFunc("datasheet.doc.__gc", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+			if len(args) == 0 {
+				return nil, nil
+			}
+			if v, ok := st.CheckUserdata(args[0], dsDocHandleMeta); ok {
+				h := v.(*dsDocHandle)
+				if h.doc != nil {
+					h.doc.release()
+					h.doc = nil
+				}
+			}
+			return nil, nil
+		}))
 	}
 
-	var createProxy func(st *moelua.State, docTok uint64, index int) (moelua.Value, error)
+	proxyUDMT, created := s.NewMetatable(dsProxyUDMeta)
+	if created {
+		_ = proxyUDMT.SetString("__gc", s.NewFunc("datasheet.proxy.__gc", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+			if len(args) == 0 {
+				return nil, nil
+			}
+			if v, ok := st.CheckUserdata(args[0], dsProxyUDMeta); ok {
+				p := v.(*dsProxy)
+				if p.doc != nil {
+					p.doc.release()
+					p.doc = nil
+				}
+			}
+			return nil, nil
+		}))
+	}
+
+	var createProxy func(st *moelua.State, doc *dsDoc, index int) (moelua.Value, error)
 	var copyTable func(st *moelua.State, tbl *moelua.Table, p *dsProxy) error
 
-	getDoc := func(docTok uint64) ([]byte, error) {
+	getAndRetainDoc := func(docTok uint64) (*dsDoc, error) {
 		v, ok := node.Objs().Get(runtime.KindDatasheetDoc, docTok)
 		if !ok {
 			return nil, errors.New("invalid datasheet document pointer")
 		}
-		return v.(*dsDoc).data, nil
+		doc := v.(*dsDoc)
+		if !doc.retain() {
+			return nil, errors.New("invalid datasheet document pointer")
+		}
+		return doc, nil
 	}
 
-	createProxy = func(st *moelua.State, docTok uint64, index int) (moelua.Value, error) {
-		doc, err := getDoc(docTok)
-		if err != nil {
-			return moelua.Nil(), err
+	createProxy = func(st *moelua.State, doc *dsDoc, index int) (moelua.Value, error) {
+		if doc == nil {
+			return moelua.Nil(), errors.New("invalid datasheet document pointer")
 		}
-		if _, ok := dsTableOffset(doc, index); !ok {
+		docBytes := doc.bytes()
+		if docBytes == nil {
+			return moelua.Nil(), errors.New("invalid datasheet document pointer")
+		}
+		if _, ok := dsTableOffset(docBytes, index); !ok {
 			return moelua.Nil(), fmt.Errorf("Invalid index %d", index)
 		}
 		nc := st.TableOf(st.Registry().GetString(dsNodeCache))
-		key := dsCacheKey(docTok, index)
+		key := dsCacheKey(doc.token(), index)
 		if existing := nc.GetString(key); existing.IsTable() {
 			return existing, nil
 		}
+		if !doc.retain() {
+			return moelua.Nil(), errors.New("invalid datasheet document pointer")
+		}
+
 		t := st.NewTable(0, 4)
+		hT := st.Pin(t.Value())
+		defer hT.Release()
+
+		pUDMT := st.GetMetatableByName(dsProxyUDMeta)
+		proxyUD, err := st.NewUserdataWithMeta(&dsProxy{doc: doc, index: index}, pUDMT)
+		if err != nil {
+			doc.release()
+			return moelua.Nil(), err
+		}
+		hP := st.Pin(proxyUD)
+		defer hP.Release()
+
 		mt := st.GetMetatableByName(dsProxyMeta)
 		_ = t.SetMetatable(mt)
 		_ = nc.SetString(key, t.Value())
 
 		pc := st.TableOf(st.Registry().GetString(dsProxyCache))
-		_ = pc.Set(t.Value(), st.NewUserdata(&dsProxy{docTok: docTok, index: index}))
+		_ = pc.Set(t.Value(), proxyUD)
 		return t.Value(), nil
 	}
 
 	copyTable = func(st *moelua.State, tbl *moelua.Table, p *dsProxy) error {
-		doc, err := getDoc(p.docTok)
-		if err != nil {
-			return err
+		if p.doc == nil {
+			return fmt.Errorf("Invalid proxy (index = %d)", p.index)
+		}
+		doc := p.doc.bytes()
+		if doc == nil {
+			return errors.New("invalid datasheet document pointer")
 		}
 		base, ok := dsTableOffset(doc, p.index)
 		if !ok {
@@ -170,7 +313,7 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			case dsValBoolean:
 				return moelua.Bool(raw != 0), nil
 			case dsValTable:
-				return createProxy(st, p.docTok, int(raw))
+				return createProxy(st, p.doc, int(raw))
 			case dsValString:
 				return st.TryString(dsReadCString(doc, strtbl, raw))
 			default:
@@ -209,10 +352,11 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 	copyFromData := func(st *moelua.State, tblVal moelua.Value) error {
 		pc := st.TableOf(st.Registry().GetString(dsProxyCache))
 		pv := pc.Get(tblVal)
-		if !pv.IsUserdata() {
+		v, ok := st.CheckUserdata(pv, dsProxyUDMeta)
+		if !ok {
 			return errors.New("Invalid proxy table")
 		}
-		p := st.Raw().UserdataData(st.Raw().AsUserdata(pv)).(*dsProxy)
+		p := v.(*dsProxy)
 		tbl := st.TableOf(tblVal)
 		if err := copyTable(st, tbl, p); err != nil {
 			return err
@@ -291,21 +435,30 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		if !ok {
 			return nil, errors.New("bad argument #1 to 'stringpointer' (string expected)")
 		}
-		tok := node.Objs().Put(runtime.KindDatasheetDoc, &dsDoc{data: []byte(str)})
-		return []moelua.Value{runtime.LightUDToken(tok)}, nil
+		doc := newDSDoc(node, []byte(str))
+		hMT := st.GetMetatableByName(dsDocHandleMeta)
+		ud, err := st.NewUserdataWithMeta(&dsDocHandle{doc: doc}, hMT)
+		if err != nil {
+			doc.release()
+			return nil, err
+		}
+		return []moelua.Value{ud}, nil
 	}))
 
 	_ = mod.SetString("new", s.NewFunc("datasheet.new", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 		if len(args) < 1 {
 			return nil, errors.New("datasheet.new requires document pointer")
 		}
-		docTok, ok := runtime.ExtractToken(args[0])
-		if !ok || docTok == 0 {
+		docTok, ok := extractDocToken(st, args[0])
+		if !ok {
 			return nil, errors.New("bad argument #1 to 'new' (lightuserdata expected)")
 		}
-		tables := st.TableOf(st.Registry().GetString(dsTables))
-		_ = tables.Set(args[0], args[0])
-		proxy, err := createProxy(st, docTok, 0)
+		doc, err := getAndRetainDoc(docTok)
+		if err != nil {
+			return nil, err
+		}
+		defer doc.release()
+		proxy, err := createProxy(st, doc, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -318,19 +471,37 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		}
 		pc := st.TableOf(st.Registry().GetString(dsProxyCache))
 		pv := pc.Get(args[0])
-		if !pv.IsUserdata() {
+		rv, ok := st.CheckUserdata(pv, dsProxyUDMeta)
+		if !ok {
 			return nil, errors.New("Invalid proxy table")
 		}
-		rootProxy := st.Raw().UserdataData(st.Raw().AsUserdata(pv)).(*dsProxy)
-		oldDocTok := rootProxy.docTok
+		rootProxy := rv.(*dsProxy)
+		oldDoc := rootProxy.doc
+		if oldDoc == nil {
+			return nil, errors.New("Invalid proxy table")
+		}
 
-		newDocTok, ok := runtime.ExtractToken(args[1])
-		if !ok || newDocTok == 0 {
+		newDocTok, ok := extractDocToken(st, args[1])
+		if !ok {
 			return nil, errors.New("bad argument #2 to 'update' (lightuserdata expected)")
 		}
-		newDoc, err := getDoc(newDocTok)
+		newDoc, err := getAndRetainDoc(newDocTok)
 		if err != nil {
 			return nil, err
+		}
+		defer newDoc.release()
+
+		if oldDoc == newDoc {
+			return []moelua.Value{args[0]}, nil
+		}
+		if !oldDoc.retain() {
+			return nil, errors.New("invalid datasheet document pointer")
+		}
+		defer oldDoc.release()
+
+		newDocBytes := newDoc.bytes()
+		if newDocBytes == nil {
+			return nil, errors.New("invalid datasheet document pointer")
 		}
 
 		nc := st.TableOf(st.Registry().GetString(dsNodeCache))
@@ -349,18 +520,25 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 				return nil
 			}
 			pv2 := pc.Get(v)
-			if !pv2.IsUserdata() {
+			udv, ok := st.CheckUserdata(pv2, dsProxyUDMeta)
+			if !ok {
 				return nil
 			}
-			p := st.Raw().UserdataData(st.Raw().AsUserdata(pv2)).(*dsProxy)
-			if p.docTok != oldDocTok {
+			p := udv.(*dsProxy)
+			if p.doc != oldDoc {
 				return nil
 			}
-			p.docTok = newDocTok
 			tbl := st.TableOf(v)
 			clearLuaTable(tbl)
 			_ = tbl.SetMetatable(proxyMT)
-			_, valid := dsTableOffset(newDoc, p.index)
+			_, valid := dsTableOffset(newDocBytes, p.index)
+			if valid && newDoc.retain() {
+				p.doc = newDoc
+			} else {
+				p.doc = nil
+				valid = false
+			}
+			oldDoc.release()
 			moves = append(moves, pendingMove{
 				oldKey: ks,
 				newKey: dsCacheKey(newDocTok, p.index),
@@ -376,6 +554,18 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			if mv.valid {
 				_ = nc.SetString(mv.newKey, mv.tblVal)
 			}
+		}
+		if rootProxy.doc == oldDoc {
+			tbl := st.TableOf(args[0])
+			clearLuaTable(tbl)
+			_ = tbl.SetMetatable(proxyMT)
+			if _, valid := dsTableOffset(newDocBytes, rootProxy.index); valid && newDoc.retain() {
+				rootProxy.doc = newDoc
+				_ = nc.SetString(dsCacheKey(newDocTok, rootProxy.index), args[0])
+			} else {
+				rootProxy.doc = nil
+			}
+			oldDoc.release()
 		}
 		return []moelua.Value{args[0]}, nil
 	}))
