@@ -74,6 +74,13 @@ MANIFEST = {
         "service/sharedatad.lua",
         "service/multicastd.lua",
     ],
+    "contrib/cluster/lua": [
+        "lualib/skynet/cluster.lua",
+        "service/clusterd.lua",
+        "service/clusteragent.lua",
+        "service/clustersender.lua",
+        "service/clusterproxy.lua",
+    ],
 }
 
 

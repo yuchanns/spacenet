@@ -2,6 +2,7 @@ go 1.27
 
 use (
 	.
+	./contrib/cluster
 	./contrib/crypt
 	./contrib/http
 	./contrib/share
@@ -12,6 +13,7 @@ use (
 
 replace (
 	github.com/yuchanns/spacenet v0.0.0 => .
+	github.com/yuchanns/spacenet/contrib/cluster v0.0.0 => ./contrib/cluster
 	github.com/yuchanns/spacenet/contrib/crypt v0.0.0 => ./contrib/crypt
 	github.com/yuchanns/spacenet/contrib/http v0.0.0 => ./contrib/http
 	github.com/yuchanns/spacenet/contrib/share v0.0.0 => ./contrib/share
