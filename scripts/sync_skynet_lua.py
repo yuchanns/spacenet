@@ -62,6 +62,18 @@ MANIFEST = {
         "lualib/sproto.lua",
         "lualib/sprotoloader.lua",
     ],
+    "contrib/share/lua": [
+        "lualib/skynet/sharetable.lua",
+        "lualib/skynet/datasheet/init.lua",
+        "lualib/skynet/datasheet/builder.lua",
+        "lualib/skynet/datasheet/dump.lua",
+        "lualib/skynet/sharedata.lua",
+        "lualib/skynet/sharedata/corelib.lua",
+        "lualib/skynet/sharemap.lua",
+        "lualib/skynet/multicast.lua",
+        "service/sharedatad.lua",
+        "service/multicastd.lua",
+    ],
 }
 
 
