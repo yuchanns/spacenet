@@ -3,6 +3,7 @@ go 1.27
 use (
 	.
 	./contrib/crypt
+	./contrib/http
 	./contrib/socket
 	./contrib/tls
 )
@@ -10,6 +11,7 @@ use (
 replace (
 	github.com/yuchanns/spacenet v0.0.0 => .
 	github.com/yuchanns/spacenet/contrib/crypt v0.0.0 => ./contrib/crypt
+	github.com/yuchanns/spacenet/contrib/http v0.0.0 => ./contrib/http
 	github.com/yuchanns/spacenet/contrib/socket v0.0.0 => ./contrib/socket
 	github.com/yuchanns/spacenet/contrib/tls v0.0.0 => ./contrib/tls
 )
