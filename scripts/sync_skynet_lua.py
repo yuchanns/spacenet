@@ -58,6 +58,10 @@ MANIFEST = {
         "lualib/http/internal.lua",
         "lualib/http/tlshelper.lua",
     ],
+    "contrib/sproto/lua": [
+        "lualib/sproto.lua",
+        "lualib/sprotoloader.lua",
+    ],
 }
 
 
