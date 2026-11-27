@@ -181,7 +181,11 @@ func (n *Node) luaLoadFile(s *moelua.State, args []moelua.Value) ([]moelua.Value
 		return []moelua.Value{moelua.Nil(), s.String(err.Error())}, nil
 	}
 	if hasEnv {
-		// Set _ENV (upvalue 1) to custom envVal via debug.setupvalue.
+		// Pin fn across s.Call(debug.setupvalue, ...) so post-call GC steps
+		// cannot sweep fn or its ArenaProto before luaLoadFile returns it.
+		raw := s.Raw()
+		fnRef := raw.Ref(fn)
+		defer raw.Unref(fnRef)
 		dbg := s.TableOf(s.GetGlobal("debug"))
 		if dbg != nil {
 			if setup := dbg.GetString("setupvalue"); !setup.IsNil() {
@@ -713,15 +717,18 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 				return nil, nil
 			}
 			if res[0].IsFalsy() {
+				errObj := moelua.Nil()
+				if len(res) > 1 {
+					errObj = res[1]
+				}
+				raw := wst.Raw()
+				errRef := raw.Ref(errObj)
+				defer raw.Unref(errRef)
 				// Close errored coroutine and propagate error (matching luaB_auxwrap).
 				if stRes, serr := wst.Call(origStatus, coHandle.Value()); serr == nil && len(stRes) > 0 {
 					if ss, ok := wst.ToString(stRes[0]); ok && ss == "dead" {
 						_, _ = wst.Call(origClose, coHandle.Value())
 					}
-				}
-				errObj := moelua.Nil()
-				if len(res) > 1 {
-					errObj = res[1]
 				}
 				if str, ok := wst.ToString(errObj); ok {
 					return nil, errors.New(str)
