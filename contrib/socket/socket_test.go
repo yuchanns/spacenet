@@ -649,3 +649,94 @@ end)
 	drain(gotA, "FOR_A_", 5)
 	drain(gotB, "FOR_B_", 5)
 }
+
+func TestBundledLoginAndMsgServerLoad(t *testing.T) {
+	customFS := fstest.MapFS{
+		"service/load_snax_net.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local loginserver = require "snax.loginserver"
+local msgserver = require "snax.msgserver"
+
+skynet.start(function()
+	assert(type(loginserver) == "function")
+	assert(type(msgserver) == "table" and type(msgserver.start) == "function")
+	skynet.error("SNAX_NET_LOAD_OK")
+	skynet.exit()
+end)
+`)},
+	}
+
+	logs := &syncBuf{}
+	node, err := spacenet.New(
+		spacenet.WithThreads(2),
+		spacenet.WithLogOutput(logs),
+		spacenet.WithContrib(socket.New()),
+		spacenet.WithFS(customFS),
+		spacenet.WithStart("load_snax_net"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "SNAX_NET_LOAD_OK")
+}
+
+func TestBindStdinRegularFile(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "stdin-*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmp.WriteString("hello-stdin\nsecond-line\n"); err != nil {
+		_ = tmp.Close()
+		t.Fatal(err)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		_ = tmp.Close()
+		t.Fatal(err)
+	}
+	origStdin := os.Stdin
+	os.Stdin = tmp
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		_ = tmp.Close()
+	})
+
+	customFS := fstest.MapFS{
+		"service/stdin_file.lua": &fstest.MapFile{Data: []byte(`
+local skynet = require "skynet"
+local socket = require "skynet.socket"
+
+skynet.start(function()
+	local id = socket.stdin()
+	local l1 = socket.readline(id, "\n")
+	local l2 = socket.readline(id, "\n")
+	local l3 = socket.readline(id, "\n")
+	assert(l1 == "hello-stdin", "unexpected l1: " .. tostring(l1))
+	assert(l2 == "second-line", "unexpected l2: " .. tostring(l2))
+	assert(l3 == false, "expected EOF after regular file, got: " .. tostring(l3))
+	skynet.error("STDIN_FILE_OK")
+	skynet.exit()
+end)
+`)},
+	}
+
+	logs := &syncBuf{}
+	node, err := spacenet.New(
+		spacenet.WithThreads(2),
+		spacenet.WithLogOutput(logs),
+		spacenet.WithContrib(socket.New()),
+		spacenet.WithFS(customFS),
+		spacenet.WithStart("stdin_file"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "STDIN_FILE_OK")
+}

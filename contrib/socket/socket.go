@@ -14,8 +14,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/yuchanns/moelua"
+	"github.com/yuchanns/spacenet/contrib/crypt"
 	"github.com/yuchanns/spacenet/runtime"
 	"github.com/yuchanns/spacenet/runtime/contrib"
 )
@@ -48,9 +50,11 @@ type SocketEvent struct {
 	UDPAddr []byte
 }
 
-// New returns the socket contrib.
+// New returns the socket contrib. It declares contrib/crypt as a dependency so
+// bundled modules (snax.loginserver, snax.msgserver) work out of the box.
 func New() *contrib.Contrib {
 	return contrib.New("socket",
+		contrib.WithDeps(crypt.New()),
 		contrib.WithInit(func(n *runtime.Node) (io.Closer, error) {
 			mgr := newManager(n)
 			n.SetExt(extKey, mgr)
@@ -106,6 +110,7 @@ type sockEntry struct {
 	readerRunning bool
 	paused        bool
 	pauseCond     *sync.Cond
+	stopCh        chan struct{}
 	errored       bool
 	closing       bool
 	closed        bool
@@ -142,9 +147,10 @@ func newManager(n *runtime.Node) *manager {
 func (m *manager) allocEntry(kind sockKind, owner uint32) *sockEntry {
 	id := int(m.nextID.Add(1))
 	e := &sockEntry{
-		id:    id,
-		kind:  kind,
-		owner: owner,
+		id:     id,
+		kind:   kind,
+		owner:  owner,
+		stopCh: make(chan struct{}),
 	}
 	e.pauseCond = sync.NewCond(&e.mu)
 	m.mu.Lock()
@@ -250,6 +256,7 @@ func (e *sockEntry) forceClose(m *manager, notify bool) {
 	e.mu.Unlock()
 
 	if !alreadyClosed {
+		close(e.stopCh)
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -502,6 +509,7 @@ func (e *sockEntry) startAcceptLoop(m *manager) {
 	e.mu.Unlock()
 
 	go func() {
+		var tempDelay time.Duration
 		for {
 			conn, err := ln.Accept()
 			e.mu.Lock()
@@ -509,17 +517,36 @@ func (e *sockEntry) startAcceptLoop(m *manager) {
 			closing := e.closing || e.closed
 			e.mu.Unlock()
 			if err != nil {
-				if closing {
+				if closing || errors.Is(err, net.ErrClosed) {
 					e.forceClose(m, true)
-				} else if !m.emit(owner, &SocketEvent{
+					return
+				}
+				if !m.emit(owner, &SocketEvent{
 					Type: SocketTypeError,
 					ID:   e.id,
 					Text: err.Error(),
 				}) {
 					e.forceClose(m, false)
+					return
 				}
-				return
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+					if tempDelay > time.Second {
+						tempDelay = time.Second
+					}
+				}
+				timer := time.NewTimer(tempDelay)
+				select {
+				case <-timer.C:
+				case <-e.stopCh:
+					timer.Stop()
+					return
+				}
+				continue
 			}
+			tempDelay = 0
 			e.statRead.Add(1)
 			e.statRTime.Store(m.node.Timer().Now())
 
@@ -1077,49 +1104,60 @@ func (m *manager) lBind(s *moelua.State, args []moelua.Value) ([]moelua.Value, e
 	if fd != 0 {
 		return nil, fmt.Errorf("socket.bind: binding os fd %d is not supported (only stdin fd 0 is supported)", fd)
 	}
+	stdin := os.Stdin
+	if stdin == nil {
+		return nil, errors.New("socket.bind: stdin is unavailable")
+	}
+	if _, statErr := stdin.Stat(); statErr != nil {
+		return nil, fmt.Errorf("socket.bind: stdin is unreadable: %w", statErr)
+	}
 	e := m.allocEntry(kindBind, actor.Handle())
 	owner := actor.Handle()
 
-	m.emit(owner, &SocketEvent{
+	if !m.emit(owner, &SocketEvent{
 		Type: SocketTypeConnect,
 		ID:   e.id,
 		Text: "bind",
-	})
+	}) {
+		e.forceClose(m, false)
+		return []moelua.Value{moelua.Int(int64(e.id))}, nil
+	}
 
-	// Only stream stdin when attached to a pipe/terminal with readable bytes;
-	// avoid hanging on closed/devnull stdin in headless tests.
-	if fi, statErr := os.Stdin.Stat(); statErr == nil && (fi.Mode()&os.ModeNamedPipe != 0 || fi.Mode()&os.ModeCharDevice != 0) {
-		go func() {
-			buf := make([]byte, 4096)
-			for {
-				n, rerr := os.Stdin.Read(buf)
-				e.mu.Lock()
-				closed := e.closed
-				curOwner := e.owner
-				e.mu.Unlock()
-				if closed {
-					return
-				}
-				if n > 0 {
-					cp := make([]byte, n)
-					copy(cp, buf[:n])
-					if !m.emit(curOwner, &SocketEvent{
-						Type: SocketTypeData,
-						ID:   e.id,
-						UD:   n,
-						Data: cp,
-					}) {
-						e.forceClose(m, false)
-						return
-					}
-				}
-				if rerr != nil {
-					e.forceClose(m, true)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := stdin.Read(buf)
+			e.mu.Lock()
+			closed := e.closed
+			errored := e.errored
+			curOwner := e.owner
+			e.mu.Unlock()
+			if closed || errored {
+				return
+			}
+			if n > 0 {
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				if !m.emit(curOwner, &SocketEvent{
+					Type: SocketTypeData,
+					ID:   e.id,
+					UD:   n,
+					Data: cp,
+				}) {
+					e.forceClose(m, false)
 					return
 				}
 			}
-		}()
-	}
+			if rerr != nil {
+				if errors.Is(rerr, io.EOF) {
+					e.forceClose(m, true)
+				} else {
+					e.failTransport(m, rerr)
+				}
+				return
+			}
+		}
+	}()
 	return []moelua.Value{moelua.Int(int64(e.id))}, nil
 }
 
