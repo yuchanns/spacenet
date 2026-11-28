@@ -11,9 +11,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/yuchanns/moelua"
 	"github.com/yuchanns/spacenet"
-	"github.com/yuchanns/spacenet/runtime/contrib"
 )
 
 const skynetAliasPreload = `
@@ -407,85 +405,4 @@ end)
 		t.Fatal(err)
 	}
 	waitForLog(t, logs, "GC_PIN_OK", 8*time.Second)
-}
-
-func TestWithLuaProfileAndOptionPrecedence(t *testing.T) {
-	mainFS := fstest.MapFS{
-		"service/profile_driver.lua": &fstest.MapFile{Data: []byte(`
-local spacenet = require "spacenet"
-require "spacenet.manager"
-local host_mod = require "app.host"
-
-spacenet.start(function()
-	assert(host_mod.who() == "user-override")
-	local ready_co = coroutine.running()
-	spacenet.dispatch("lua", function(_, _, tag)
-		if tag == "ready" then
-			spacenet.wakeup(ready_co)
-		end
-	end)
-	local worker = spacenet.launch("worker_vm", "worker_svc " .. spacenet.address(spacenet.self()))
-	assert(worker, "failed to launch worker_vm")
-	spacenet.wait()
-	local resp = spacenet.call(worker, "lua", "ping", 7)
-	assert(resp == "worker:14", "unexpected resp: " .. tostring(resp))
-	spacenet.error("PROFILE_DRIVER_OK")
-	spacenet.exit()
-end)
-`)},
-	}
-	workerFS := fstest.MapFS{
-		"service/worker_svc.lua": &fstest.MapFile{Data: []byte(`
-local spacenet = require "spacenet"
-local c = require "spacenet.core"
-local driver = ...
-
-spacenet.start(function()
-	local ok = pcall(c.command, "LAUNCH", "snlua worker_svc")
-	assert(not ok, "worker_vm must not be permitted to LAUNCH")
-	assert(c.redirect == nil, "worker_vm must not expose redirect")
-	spacenet.dispatch("lua", function(session, source, cmd, n)
-		if cmd == "ping" then
-			spacenet.retpack("worker:" .. tostring(n * 2))
-		end
-	end)
-	spacenet.send(driver, "lua", "ready")
-end)
-`)},
-	}
-
-	baseContrib := contrib.New("test_override",
-		contrib.WithPreload("app.host", func(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-			tbl := s.NewTable(0, 1)
-			_ = tbl.SetString("who", s.NewFunc("who", func(st *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-				return []moelua.Value{st.String("contrib-default")}, nil
-			}))
-			return []moelua.Value{tbl.Value()}, nil
-		}),
-	)
-
-	node, logs := newCoreTestNode(t, "profile_driver",
-		spacenet.WithDisableOSFS(),
-		spacenet.WithFS(mainFS),
-		// Deliberately register WithPreload BEFORE WithContrib to verify user
-		// preloads always override contrib defaults regardless of option order.
-		spacenet.WithPreload("app.host", func(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-			tbl := s.NewTable(0, 1)
-			_ = tbl.SetString("who", s.NewFunc("who", func(st *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-				return []moelua.Value{st.String("user-override")}, nil
-			}))
-			return []moelua.Value{tbl.Value()}, nil
-		}),
-		spacenet.WithContrib(baseContrib),
-		spacenet.WithLuaProfile("worker_vm", spacenet.LuaProfile{
-			FS:              []fs.FS{workerFS},
-			CoreCommands:    []string{"TIMEOUT", "QUERY", "EXIT", "STAT", "GETENV"},
-			DisableRedirect: true,
-			MemoryLimit:     8 << 20,
-		}),
-	)
-	if err := node.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitForLog(t, logs, "PROFILE_DRIVER_OK", 5*time.Second)
 }

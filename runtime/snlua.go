@@ -42,12 +42,10 @@ func ActorFromState(s *moelua.State) (*Actor, error) {
 }
 
 // snluaService implements Skynet's "snlua" service backed by a per-actor MoeLua VM
-// cloned from a *LuaTemplate (either the Node's default template or a custom profile).
+// cloned from Node's shared compacted *moelua.Template.
 type snluaService struct {
-	tmpl   *LuaTemplate
-	actor  *Actor
-	state  *moelua.State
-	initOK bool
+	actor *Actor
+	state *moelua.State
 
 	launched bool
 	cbFn     *moelua.Handle
@@ -62,80 +60,81 @@ type snluaService struct {
 	profActive int
 }
 
+func newSnluaService() ServiceHandler {
+	return &snluaService{
+		memReport: memWarningReportStart,
+	}
+}
+
+// buildLuaTemplate builds the single immutable MoeLua Template shared by all
+// snlua actors in this Node.
+func (n *Node) buildLuaTemplate(pluginPreloads map[string]moelua.GoFunc) (*moelua.Template, error) {
+	opts := []moelua.Option{
+		moelua.WithNoEnv(),
+		moelua.WithLibs(moelua.LibAll),
+		moelua.WithPreload("spacenet.core", n.preloadCore),
+		moelua.WithPreload("spacenet.codecache", n.preloadCodeCache),
+		moelua.WithPreload("spacenet.profile", n.preloadProfile),
+	}
+	for name, loader := range pluginPreloads {
+		opts = append(opts, moelua.WithPreload(name, loader))
+	}
+
+	return moelua.NewTemplate(func(s *moelua.State) error {
+		n.InstallVFSLoaders(s)
+		return nil
+	}, opts...)
+}
+
 // InstallVFSLoaders overrides loadfile, dofile, package.searchpath, and
 // package.searchers[2] on s so Lua code resolves modules and scripts through
 // the Node's LayeredFS and CodeCache.
 func (n *Node) InstallVFSLoaders(s *moelua.State) {
-	n.defaultLuaTmpl.installVFSLoaders(s, false)
+	n.installVFSLoaders(s, false)
 }
 
 // InstallFreshVFSLoaders installs LayeredFS-backed loadfile, dofile,
 // package.searchpath, and package.searchers[2] on s that bypass CodeCache so
 // explicit config reloads always observe updated files on disk.
 func (n *Node) InstallFreshVFSLoaders(s *moelua.State) {
-	n.defaultLuaTmpl.installVFSLoaders(s, true)
+	n.installVFSLoaders(s, true)
 }
 
-func (lt *LuaTemplate) installVFSLoaders(s *moelua.State, bypassCache bool) {
-	loadFileFn := lt.luaLoadFile
-	doFileFn := lt.luaDoFile
-	searchPathFn := lt.luaSearchPath
-	searcherFn := lt.luaSearcher
+func (n *Node) installVFSLoaders(s *moelua.State, bypassCache bool) {
+	loadFileFn := n.luaLoadFile
+	doFileFn := n.luaDoFile
+	searchPathFn := n.luaSearchPath
+	searcherFn := n.luaSearcher
 	if bypassCache {
-		loadFileFn = lt.luaLoadFileUncached
-		doFileFn = lt.luaDoFileUncached
-		searchPathFn = lt.luaSearchPathUncached
-		searcherFn = lt.luaSearcherUncached
+		loadFileFn = n.luaLoadFileUncached
+		doFileFn = n.luaDoFileUncached
+		searchPathFn = n.luaSearchPathUncached
+		searcherFn = n.luaSearcherUncached
 	}
 
-	if lt.libs&moelua.LibBaseFile != 0 {
-		s.RegisterFunc("loadfile", loadFileFn)
-		s.RegisterFunc("dofile", doFileFn)
-	}
+	s.RegisterFunc("loadfile", loadFileFn)
+	s.RegisterFunc("dofile", doFileFn)
 
 	pkg := s.TableOf(s.GetGlobal("package"))
-	if pkg == nil {
-		return
-	}
-	if lt.libs&moelua.LibPackage != 0 {
+	if pkg != nil {
 		_ = pkg.SetString("searchpath", s.NewFunc("package.searchpath", searchPathFn))
 		searchers := s.TableOf(pkg.GetString("searchers"))
 		if searchers != nil {
 			// Replace Lua file searcher (index 2) with LayeredFS searcher.
 			_ = searchers.SetInt(2, s.NewFunc("spacenet.lua_searcher", searcherFn))
 		}
-	} else if lt.libs&moelua.LibPackageSafe != 0 {
-		// Under LibPackageSafe, keep package.searchpath and OS searchers absent
-		// and install (or replace in place on fresh reload) the template's
-		// LayeredFS/CodeCache searcher.
-		if searchers := s.TableOf(pkg.GetString("searchers")); searchers != nil {
-			reg := s.Registry()
-			idx := int64(0)
-			if reg != nil {
-				if iv := reg.GetString("spacenet_vfs_searcher_idx"); iv.IsInt() && iv.Int() > 0 && iv.Int() <= searchers.Len()+1 {
-					idx = iv.Int()
-				}
-			}
-			if idx == 0 {
-				idx = searchers.Len() + 1
-				if reg != nil {
-					_ = reg.SetString("spacenet_vfs_searcher_idx", moelua.Int(idx))
-				}
-			}
-			_ = searchers.SetInt(idx, s.NewFunc("spacenet.lua_searcher", searcherFn))
-		}
 	}
 }
 
-func (lt *LuaTemplate) luaSearchPath(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaSearchPathImpl(s, args, false)
+func (n *Node) luaSearchPath(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearchPathImpl(s, args, false)
 }
 
-func (lt *LuaTemplate) luaSearchPathUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaSearchPathImpl(s, args, true)
+func (n *Node) luaSearchPathUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearchPathImpl(s, args, true)
 }
 
-func (lt *LuaTemplate) luaSearchPathImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
+func (n *Node) luaSearchPathImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
 	if len(args) < 2 {
 		return nil, errors.New("bad argument to 'searchpath' (string expected)")
 	}
@@ -163,9 +162,9 @@ func (lt *LuaTemplate) luaSearchPathImpl(s *moelua.State, args []moelua.Value, b
 	}
 	var found, errMsg string
 	if bypassCache {
-		found, errMsg = lt.vfs.SearchPath(name, pathStr, sep, rep)
+		found, errMsg = n.vfs.SearchPath(name, pathStr, sep, rep)
 	} else {
-		found, errMsg = lt.cache.SearchPath(name, pathStr, sep, rep)
+		found, errMsg = n.cache.SearchPath(name, pathStr, sep, rep)
 	}
 	if found == "" {
 		return []moelua.Value{moelua.Nil(), s.String(errMsg)}, nil
@@ -173,15 +172,15 @@ func (lt *LuaTemplate) luaSearchPathImpl(s *moelua.State, args []moelua.Value, b
 	return []moelua.Value{s.String(found)}, nil
 }
 
-func (lt *LuaTemplate) luaLoadFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaLoadFileImpl(s, args, false)
+func (n *Node) luaLoadFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaLoadFileImpl(s, args, false)
 }
 
-func (lt *LuaTemplate) luaLoadFileUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaLoadFileImpl(s, args, true)
+func (n *Node) luaLoadFileUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaLoadFileImpl(s, args, true)
 }
 
-func (lt *LuaTemplate) luaLoadFileImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
+func (n *Node) luaLoadFileImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
 	if len(args) == 0 || args[0].IsNil() {
 		return []moelua.Value{moelua.Nil(), s.String("loadfile without filename is not supported")}, nil
 	}
@@ -202,60 +201,20 @@ func (lt *LuaTemplate) luaLoadFileImpl(s *moelua.State, args []moelua.Value, byp
 		envVal = args[2]
 	}
 
-	// If custom env is requested and debug.setupvalue is unavailable (e.g.
-	// LibBaseFile without LibDebug), delegate to Lua 5.5 built-in load().
-	if hasEnv {
-		dbg := s.TableOf(s.GetGlobal("debug"))
-		if dbg == nil || dbg.GetString("setupvalue").IsNil() {
-			data, resolved, rerr := lt.vfs.ReadFile(filename)
-			if rerr != nil {
-				return []moelua.Value{moelua.Nil(), s.String(rerr.Error())}, nil
-			}
-			loadFn := s.GetGlobal("load")
-			if !loadFn.IsFunction() {
-				return []moelua.Value{moelua.Nil(), s.String("loadfile with env requires debug.setupvalue or global load")}, nil
-			}
-			raw := s.Raw()
-			mark := raw.PinTempMark()
-			defer raw.UnpinTemp(mark)
-			raw.PinTemp(loadFn)
-			raw.PinTemp(envVal)
-
-			data = stripBOMAndShebangBytes(data)
-			strVal, serr := s.TryString(string(data))
-			if serr != nil {
-				return []moelua.Value{moelua.Nil(), s.String(serr.Error())}, nil
-			}
-			raw.PinTemp(strVal)
-			nameVal, nerr := s.TryString("@" + resolved)
-			if nerr != nil {
-				return []moelua.Value{moelua.Nil(), s.String(nerr.Error())}, nil
-			}
-			raw.PinTemp(nameVal)
-			modeVal, merr := s.TryString(mode)
-			if merr != nil {
-				return []moelua.Value{moelua.Nil(), s.String(merr.Error())}, nil
-			}
-			raw.PinTemp(modeVal)
-			return s.Call(loadFn, strVal, nameVal, modeVal, envVal)
-		}
-	}
-
 	var ch *moelua.Chunk
 	var err error
 	if mode == "bt" {
 		if bypassCache {
-			ch, err = lt.vfs.LoadChunkUncached(filename)
+			ch, err = n.vfs.LoadChunkUncached(filename)
 		} else {
-			ch, err = lt.cache.LoadChunk(filename)
+			ch, err = n.cache.LoadChunk(filename)
 		}
 	} else {
-		data, resolved, rerr := lt.vfs.ReadFile(filename)
+		data, resolved, rerr := n.vfs.ReadFile(filename)
 		if rerr != nil {
 			err = rerr
 		} else {
-			stripped := stripBOMAndShebangBytes(data)
-			isBin := len(stripped) >= 4 && stripped[0] == 0x1b && stripped[1] == 'L' && stripped[2] == 'u' && stripped[3] == 'a'
+			isBin := len(data) >= 4 && data[0] == 0x1b && data[1] == 'L' && data[2] == 'u' && data[3] == 'a'
 			if isBin && !strings.ContainsRune(mode, 'b') {
 				err = fmt.Errorf("attempt to load a binary chunk (mode is '%s')", mode)
 			} else if !isBin && !strings.ContainsRune(mode, 't') {
@@ -288,16 +247,16 @@ func (lt *LuaTemplate) luaLoadFileImpl(s *moelua.State, args []moelua.Value, byp
 	return []moelua.Value{fn}, nil
 }
 
-func (lt *LuaTemplate) luaDoFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaDoFileImpl(s, args, false)
+func (n *Node) luaDoFile(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaDoFileImpl(s, args, false)
 }
 
-func (lt *LuaTemplate) luaDoFileUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaDoFileImpl(s, args, true)
+func (n *Node) luaDoFileUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaDoFileImpl(s, args, true)
 }
 
-func (lt *LuaTemplate) luaDoFileImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
-	res, err := lt.luaLoadFileImpl(s, args, bypassCache)
+func (n *Node) luaDoFileImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
+	res, err := n.luaLoadFileImpl(s, args, bypassCache)
 	if err != nil {
 		return nil, err
 	}
@@ -313,15 +272,15 @@ func (lt *LuaTemplate) luaDoFileImpl(s *moelua.State, args []moelua.Value, bypas
 	return s.Call(res[0])
 }
 
-func (lt *LuaTemplate) luaSearcher(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaSearcherImpl(s, args, false)
+func (n *Node) luaSearcher(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearcherImpl(s, args, false)
 }
 
-func (lt *LuaTemplate) luaSearcherUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	return lt.luaSearcherImpl(s, args, true)
+func (n *Node) luaSearcherUncached(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	return n.luaSearcherImpl(s, args, true)
 }
 
-func (lt *LuaTemplate) luaSearcherImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
+func (n *Node) luaSearcherImpl(s *moelua.State, args []moelua.Value, bypassCache bool) ([]moelua.Value, error) {
 	if len(args) < 1 {
 		return nil, errors.New("bad argument #1 to searcher (string expected)")
 	}
@@ -333,22 +292,15 @@ func (lt *LuaTemplate) luaSearcherImpl(s *moelua.State, args []moelua.Value, byp
 	if pkg == nil {
 		return []moelua.Value{s.String("\n\tno 'package' table")}, nil
 	}
-	var pathStr string
-	if pVal := pkg.GetString("path"); !pVal.IsNil() {
-		pathStr, ok = s.ToString(pVal)
-		if !ok {
-			return []moelua.Value{s.String("\n\t'package.path' must be a string")}, nil
-		}
-	} else if lt.libs&moelua.LibPackage == 0 {
-		pathStr = "./?.lua;./?/init.lua"
-	} else {
+	pathStr, ok := s.ToString(pkg.GetString("path"))
+	if !ok {
 		return []moelua.Value{s.String("\n\t'package.path' must be a string")}, nil
 	}
 	var filename, errMsg string
 	if bypassCache {
-		filename, errMsg = lt.vfs.SearchPath(modName, pathStr, ".", "/")
+		filename, errMsg = n.vfs.SearchPath(modName, pathStr, ".", "/")
 	} else {
-		filename, errMsg = lt.cache.SearchPath(modName, pathStr, ".", "/")
+		filename, errMsg = n.cache.SearchPath(modName, pathStr, ".", "/")
 	}
 	if filename == "" {
 		return []moelua.Value{s.String(errMsg)}, nil
@@ -356,9 +308,9 @@ func (lt *LuaTemplate) luaSearcherImpl(s *moelua.State, args []moelua.Value, byp
 	var ch *moelua.Chunk
 	var err error
 	if bypassCache {
-		ch, err = lt.vfs.LoadChunkUncached(filename)
+		ch, err = n.vfs.LoadChunkUncached(filename)
 	} else {
-		ch, err = lt.cache.LoadChunk(filename)
+		ch, err = n.cache.LoadChunk(filename)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error loading module '%s' from file '%s':\n\t%v", modName, filename, err)
@@ -373,28 +325,16 @@ func (lt *LuaTemplate) luaSearcherImpl(s *moelua.State, args []moelua.Value, byp
 func (l *snluaService) Init(actor *Actor, param string) error {
 	l.actor = actor
 	n := actor.node
-	lt := l.tmpl
-	if lt == nil {
-		lt = n.defaultLuaTmpl
-		l.tmpl = lt
-	} else if lt.node != n {
-		return errors.New("spacenet: LuaTemplate belongs to a different Node")
-	}
-
-	useJIT := n.cfg.JIT
-	if lt.jitOverride != nil {
-		useJIT = *lt.jitOverride
-	}
 
 	opts := []moelua.Option{
 		moelua.WithNoEnv(),
 		moelua.WithContext(actor.killCtx),
 		moelua.WithErrorOutput(&actorWarnWriter{actor: actor}),
 	}
-	if useJIT {
+	if n.cfg.JIT {
 		opts = append(opts, moelua.WithJIT())
 	}
-	s := lt.tmpl.NewState(opts...)
+	s := n.tmpl.NewState(opts...)
 	l.state = s
 
 	raw := s.Raw()
@@ -421,112 +361,39 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 	})
 	l.tbFn = s.Pin(tbFn)
 
-	hasPkg := lt.libs&(moelua.LibPackage|moelua.LibPackageSafe) != 0
-
 	// Open spacenet.profile and replace coroutine.resume / coroutine.wrap (matching service_snlua.c:448-458).
-	if !lt.disableProf && hasPkg && lt.libs&moelua.LibCoroutine != 0 {
-		profMod, err := s.RequireLib("spacenet.profile", n.preloadProfile, false)
-		if err != nil {
-			l.Close(actor)
-			return err
-		}
-		profTbl := s.TableOf(profMod)
-		coroTbl := s.TableOf(s.GetGlobal("coroutine"))
-		if profTbl != nil && coroTbl != nil {
-			_ = coroTbl.SetString("resume", profTbl.GetString("resume"))
-			_ = coroTbl.SetString("wrap", profTbl.GetString("wrap"))
-		}
+	profMod, err := s.RequireLib("spacenet.profile", n.preloadProfile, false)
+	if err != nil {
+		s.Close()
+		return err
+	}
+	profTbl := s.TableOf(profMod)
+	coroTbl := s.TableOf(s.GetGlobal("coroutine"))
+	if profTbl != nil && coroTbl != nil {
+		_ = coroTbl.SetString("resume", profTbl.GetString("resume"))
+		_ = coroTbl.SetString("wrap", profTbl.GetString("wrap"))
 	}
 
 	// Register spacenet.codecache in package.loaded.
-	if !lt.disableCC && hasPkg {
-		if _, err := s.RequireLib("spacenet.codecache", lt.preloadCodeCache, false); err != nil {
-			l.Close(actor)
-			return err
-		}
+	if _, err := s.RequireLib("spacenet.codecache", n.preloadCodeCache, false); err != nil {
+		s.Close()
+		return err
 	}
 
-	// Apply host-enforced memory limit before InitState or any user Lua executes.
-	if lt.memLimit > 0 {
-		s.SetMemoryLimit(lt.memLimit)
-	}
-
-	// Queue the initial launch message BEFORE invoking InitState so any message
-	// sent to this actor during InitState (or via a handle published by InitState)
-	// cannot overtake the launch message (matching snlua_init ordering).
+	// Queue the initial launch message to self (must be the first message, matching snlua_init).
+	actor.SetMemoryUsage(s.MemoryUsage())
 	actor.queue.Push(Message{
 		Source:  0,
 		Session: 0,
 		Type:    PTypeText,
 		Data:    []byte(param),
 	}, nil)
-
-	if lt.initState != nil {
-		if err := lt.initState(actor, s); err != nil {
-			l.Close(actor)
-			return err
-		}
-	}
-
-	l.initOK = true
-	actor.SetMemoryUsage(s.MemoryUsage())
 	return nil
-}
-
-func (l *snluaService) applyLuaMemLimit() {
-	s := l.state
-	if s == nil {
-		return
-	}
-	reg := s.Registry()
-	if reg == nil {
-		return
-	}
-	if mv := reg.GetString("memlimit"); mv.IsNumber() {
-		limit := int64(0)
-		if mv.IsInt() {
-			limit = mv.Int()
-		} else {
-			f := mv.Float()
-			if !math.IsNaN(f) && !math.IsInf(f, 0) && f > 0 {
-				if f >= float64(math.MaxInt64) {
-					limit = math.MaxInt64
-				} else {
-					limit = int64(f)
-				}
-			}
-		}
-		if limit > 0 {
-			if l.tmpl != nil && l.tmpl.memLimit > 0 && limit > l.tmpl.memLimit {
-				limit = l.tmpl.memLimit
-			}
-			s.SetMemoryLimit(limit)
-			l.actor.node.Error(l.actor.handle, "Set memory limit to %.2f M", float64(limit)/(1024*1024))
-		}
-		_ = reg.SetString("memlimit", moelua.Nil())
-	}
 }
 
 func (l *snluaService) launch(args string) {
 	s := l.state
 	n := l.actor.node
-	lt := l.tmpl
-
-	if lt.loaderFunc != nil {
-		if err := lt.loaderFunc(l.actor, s, args); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				n.Error(l.actor.handle, "lua loader error : %v", err)
-			}
-			l.reportLauncherError()
-			n.Kill(l.actor, 0)
-			return
-		}
-		if !l.actor.retired.Load() {
-			l.applyLuaMemLimit()
-			l.checkMemWarning()
-		}
-		return
-	}
 
 	optEnv := func(key, def string) string {
 		if v, ok := n.GetEnv(key); ok {
@@ -544,11 +411,8 @@ func (l *snluaService) launch(args string) {
 		s.SetGlobal("LUA_PRELOAD", moelua.Nil())
 	}
 
-	loaderPath := lt.loaderPath
-	if loaderPath == "" {
-		loaderPath = optEnv("lualoader", "./lualib/loader.lua")
-	}
-	ch, err := lt.cache.LoadChunk(loaderPath)
+	loaderPath := optEnv("lualoader", "./lualib/loader.lua")
+	ch, err := n.cache.LoadChunk(loaderPath)
 	if err != nil {
 		n.Error(l.actor.handle, "Can't load %s : %v", loaderPath, err)
 		l.reportLauncherError()
@@ -572,12 +436,24 @@ func (l *snluaService) launch(args string) {
 		return
 	}
 
-	// Honor skynet.memlimit(bytes) set during top-level script evaluation (service_snlua.c:499-505),
-	// clamped to the profile's host-enforced MemoryLimit when configured.
-	if !l.actor.retired.Load() {
-		l.applyLuaMemLimit()
-		l.checkMemWarning()
+	// Honor skynet.memlimit(bytes) set during top-level script evaluation (service_snlua.c:499-505).
+	reg := s.Registry()
+	if reg != nil {
+		if mv := reg.GetString("memlimit"); mv.IsNumber() {
+			limit := int64(0)
+			if mv.IsInt() {
+				limit = mv.Int()
+			} else {
+				limit = int64(mv.Float())
+			}
+			if limit > 0 {
+				s.SetMemoryLimit(limit)
+				n.Error(l.actor.handle, "Set memory limit to %.2f M", float64(limit)/(1024*1024))
+			}
+			_ = reg.SetString("memlimit", moelua.Nil())
+		}
 	}
+	l.checkMemWarning()
 }
 
 func (l *snluaService) reportLauncherError() {
@@ -590,24 +466,7 @@ func (l *snluaService) Dispatch(actor *Actor, msg *Message) error {
 		l.launch(string(msg.Data))
 		return nil
 	}
-	if l.state == nil {
-		actor.node.dropMessage(actor.handle, *msg)
-		return nil
-	}
-	if l.tmpl != nil && l.tmpl.dispatchFn != nil {
-		if msg.OwnedToken != 0 {
-			defer actor.node.msgs.Free(msg.OwnedToken)
-		}
-		if err := l.tmpl.dispatchFn(actor, l.state, msg); err != nil {
-			if !errors.Is(err, context.Canceled) {
-				actor.node.Error(actor.handle, "lua dispatch [%x to :%x : %d msgsz = %d] error : %s%v%s",
-					msg.Source, actor.handle, msg.Session, len(msg.Data), ansiRed, err, ansiNormal)
-			}
-		}
-		l.checkMemWarning()
-		return nil
-	}
-	if l.cbFn == nil {
+	if l.cbFn == nil || l.state == nil {
 		actor.node.dropMessage(actor.handle, *msg)
 		return nil
 	}
@@ -691,16 +550,7 @@ func (l *snluaService) Signal(actor *Actor, sig int) {
 	}
 }
 
-func (l *snluaService) Close(actor *Actor) {
-	if l.state != nil {
-		// Clear the actor's canceled killCtx before CloseFunc / Close so
-		// cleanup hooks and Lua/userdata __gc finalizers can run during teardown.
-		l.state.SetContext(nil)
-		if l.initOK && l.tmpl != nil && l.tmpl.closeFn != nil {
-			l.tmpl.closeFn(actor, l.state)
-		}
-		l.initOK = false
-	}
+func (l *snluaService) Close(_ *Actor) {
 	if l.cbFn != nil {
 		l.cbFn.Release()
 		l.cbFn = nil
@@ -718,6 +568,9 @@ func (l *snluaService) Close(actor *Actor) {
 		l.profTotal = nil
 	}
 	if l.state != nil {
+		// Clear the actor's canceled killCtx before Close so Lua/userdata __gc
+		// finalizers (e.g. datasheet/sharedata/stm cleanup) run during teardown.
+		l.state.SetContext(nil)
 		l.state.Close()
 		l.state = nil
 	}
@@ -752,10 +605,10 @@ func snluaFromState(s *moelua.State) (*snluaService, error) {
 
 // ---------- spacenet.codecache ----------
 
-func (lt *LuaTemplate) preloadCodeCache(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
+func (n *Node) preloadCodeCache(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 	tbl := s.NewTable(0, 4)
 	_ = tbl.SetString("clear", s.NewFunc("codecache.clear", func(_ *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-		lt.cache.Clear()
+		n.cache.Clear()
 		return nil, nil
 	}))
 	_ = tbl.SetString("mode", s.NewFunc("codecache.mode", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
@@ -767,15 +620,13 @@ func (lt *LuaTemplate) preloadCodeCache(s *moelua.State, _ []moelua.Value) ([]mo
 				return nil, errors.New("bad argument #1 to 'mode' (string expected)")
 			}
 		}
-		res, err := lt.cache.Mode(mode)
+		res, err := n.cache.Mode(mode)
 		if err != nil {
 			return nil, err
 		}
 		return []moelua.Value{st.String(res)}, nil
 	}))
-	if lt.libs&moelua.LibBaseFile != 0 {
-		_ = tbl.SetString("loadfile", s.NewFunc("codecache.loadfile", lt.luaLoadFile))
-	}
+	_ = tbl.SetString("loadfile", s.NewFunc("codecache.loadfile", n.luaLoadFile))
 	return []moelua.Value{tbl.Value()}, nil
 }
 
@@ -785,10 +636,6 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 	l, err := snluaFromState(s)
 	if err != nil {
 		return nil, err
-	}
-	coroTbl := s.TableOf(s.GetGlobal("coroutine"))
-	if coroTbl == nil {
-		return nil, errors.New("spacenet.profile requires coroutine library")
 	}
 
 	makeWeakTable := func() *moelua.Table {
@@ -803,6 +650,7 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 	l.profStart = s.Pin(startTbl.Value())
 	l.profTotal = s.Pin(totalTbl.Value())
 
+	coroTbl := s.TableOf(s.GetGlobal("coroutine"))
 	origResume := coroTbl.GetString("resume")
 	origCreate := coroTbl.GetString("create")
 	origRunning := coroTbl.GetString("running")
@@ -983,8 +831,7 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 
 // ---------- spacenet.core ----------
 
-func (lt *LuaTemplate) preloadCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
-	n := lt.node
+func (n *Node) preloadCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 	actor, err := ActorFromState(s)
 	if err != nil {
 		return nil, err
@@ -1003,26 +850,24 @@ func (lt *LuaTemplate) preloadCore(s *moelua.State, _ []moelua.Value) ([]moelua.
 	setFn("genid", func(_ *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 		return []moelua.Value{moelua.Int(int64(actor.NewSession()))}, nil
 	})
-	if !lt.disableRedir {
-		setFn("redirect", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-			if len(args) < 2 {
-				return nil, errors.New("redirect requires source address")
-			}
-			src, ok := toIntArg(args[1])
-			if !ok {
-				return nil, errors.New("bad argument #2 to 'redirect' (number expected)")
-			}
-			return n.sendLuaMessage(st, actor, args, uint32(src), 2)
-		})
-	}
+	setFn("redirect", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+		if len(args) < 2 {
+			return nil, errors.New("redirect requires source address")
+		}
+		src, ok := toIntArg(args[1])
+		if !ok {
+			return nil, errors.New("bad argument #2 to 'redirect' (number expected)")
+		}
+		return n.sendLuaMessage(st, actor, args, uint32(src), 2)
+	})
 	setFn("command", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-		return lt.coreCommand(st, actor, args)
+		return n.coreCommand(st, actor, args)
 	})
 	setFn("intcommand", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-		return lt.coreIntCommand(st, actor, args)
+		return n.coreIntCommand(st, actor, args)
 	})
 	setFn("addresscommand", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-		return lt.coreAddressCommand(st, actor, args)
+		return n.coreAddressCommand(st, actor, args)
 	})
 	setFn("error", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 		return n.coreError(st, actor, args)
@@ -1064,16 +909,13 @@ func (n *Node) coreCallback(s *moelua.State, l *snluaService, args []moelua.Valu
 	return nil, nil
 }
 
-func (lt *LuaTemplate) coreCommand(s *moelua.State, actor *Actor, args []moelua.Value) ([]moelua.Value, error) {
+func (n *Node) coreCommand(s *moelua.State, actor *Actor, args []moelua.Value) ([]moelua.Value, error) {
 	if len(args) < 1 {
 		return nil, errors.New("bad argument #1 to 'command' (string expected)")
 	}
 	cmd, ok := s.ToString(args[0])
 	if !ok {
 		return nil, errors.New("bad argument #1 to 'command' (string expected)")
-	}
-	if !lt.commandAllowed(cmd) {
-		return nil, fmt.Errorf("spacenet: command %q is not permitted in this profile", cmd)
 	}
 	var param string
 	if len(args) >= 2 && !args[1].IsNil() {
@@ -1082,23 +924,20 @@ func (lt *LuaTemplate) coreCommand(s *moelua.State, actor *Actor, args []moelua.
 			return nil, errors.New("bad argument #2 to 'command' (string expected)")
 		}
 	}
-	res, has := lt.node.Command(actor, cmd, param)
+	res, has := n.Command(actor, cmd, param)
 	if !has {
 		return nil, nil
 	}
 	return []moelua.Value{s.String(res)}, nil
 }
 
-func (lt *LuaTemplate) coreAddressCommand(s *moelua.State, actor *Actor, args []moelua.Value) ([]moelua.Value, error) {
+func (n *Node) coreAddressCommand(s *moelua.State, actor *Actor, args []moelua.Value) ([]moelua.Value, error) {
 	if len(args) < 1 {
 		return nil, errors.New("bad argument #1 to 'addresscommand' (string expected)")
 	}
 	cmd, ok := s.ToString(args[0])
 	if !ok {
 		return nil, errors.New("bad argument #1 to 'addresscommand' (string expected)")
-	}
-	if !lt.commandAllowed(cmd) {
-		return nil, fmt.Errorf("spacenet: command %q is not permitted in this profile", cmd)
 	}
 	var param string
 	if len(args) >= 2 && !args[1].IsNil() {
@@ -1107,7 +946,7 @@ func (lt *LuaTemplate) coreAddressCommand(s *moelua.State, actor *Actor, args []
 			return nil, errors.New("bad argument #2 to 'addresscommand' (string expected)")
 		}
 	}
-	res, has := lt.node.Command(actor, cmd, param)
+	res, has := n.Command(actor, cmd, param)
 	if !has || !strings.HasPrefix(res, ":") {
 		return nil, nil
 	}
@@ -1118,16 +957,13 @@ func (lt *LuaTemplate) coreAddressCommand(s *moelua.State, actor *Actor, args []
 	return []moelua.Value{moelua.Int(int64(v))}, nil
 }
 
-func (lt *LuaTemplate) coreIntCommand(s *moelua.State, actor *Actor, args []moelua.Value) ([]moelua.Value, error) {
+func (n *Node) coreIntCommand(s *moelua.State, actor *Actor, args []moelua.Value) ([]moelua.Value, error) {
 	if len(args) < 1 {
 		return nil, errors.New("bad argument #1 to 'intcommand' (string expected)")
 	}
 	cmd, ok := s.ToString(args[0])
 	if !ok {
 		return nil, errors.New("bad argument #1 to 'intcommand' (string expected)")
-	}
-	if !lt.commandAllowed(cmd) {
-		return nil, fmt.Errorf("spacenet: command %q is not permitted in this profile", cmd)
 	}
 	var param string
 	if len(args) >= 2 && !args[1].IsNil() {
@@ -1146,7 +982,7 @@ func (lt *LuaTemplate) coreIntCommand(s *moelua.State, actor *Actor, args []moel
 			}
 		}
 	}
-	res, has := lt.node.Command(actor, cmd, param)
+	res, has := n.Command(actor, cmd, param)
 	if !has {
 		return nil, nil
 	}
