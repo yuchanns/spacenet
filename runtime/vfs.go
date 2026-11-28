@@ -63,7 +63,7 @@ func (l *LayeredFS) Exists(name string) bool {
 		}
 	}
 	vpath := normalizeVFSPath(name)
-	if vpath == "." || vpath == "" || strings.HasPrefix(vpath, "..") {
+	if vpath == "." || vpath == "" || !fs.ValidPath(vpath) {
 		return false
 	}
 	for _, layer := range l.layers {
@@ -86,7 +86,7 @@ func (l *LayeredFS) ReadFile(name string) ([]byte, string, error) {
 		}
 	}
 	vpath := normalizeVFSPath(name)
-	if vpath != "." && vpath != "" && !strings.HasPrefix(vpath, "..") {
+	if vpath != "." && vpath != "" && fs.ValidPath(vpath) {
 		for _, layer := range l.layers {
 			if fi, err := fs.Stat(layer, vpath); err == nil && !fi.IsDir() {
 				data, err := fs.ReadFile(layer, vpath)
@@ -300,24 +300,31 @@ func (c *CodeCache) LoadChunk(filename string) (*moelua.Chunk, error) {
 	return ch, nil
 }
 
-// compileChunkBytes handles UTF-8 BOM, leading shebang '#', and binary Lua chunks
-// just like Lua 5.5 luaL_loadfilex, preserving full debug metadata.
-func compileChunkBytes(chunkName string, data []byte) (*moelua.Chunk, error) {
-	// Strip UTF-8 BOM if present.
+// stripBOMAndShebangBytes strips an optional UTF-8 BOM and leading '#' shebang
+// line while preserving line numbers (matching Lua 5.5 luaL_loadfilex).
+func stripBOMAndShebangBytes(data []byte) []byte {
 	if bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
 		data = data[3:]
 	}
+	if len(data) > 0 && data[0] == '#' {
+		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
+			if idx+1 < len(data) && data[idx+1] == 0x1b {
+				return data[idx+1:]
+			}
+			return data[idx:]
+		}
+		return nil
+	}
+	return data
+}
+
+// compileChunkBytes handles UTF-8 BOM, leading shebang '#', and binary Lua chunks
+// just like Lua 5.5 luaL_loadfilex, preserving full debug metadata.
+func compileChunkBytes(chunkName string, data []byte) (*moelua.Chunk, error) {
+	data = stripBOMAndShebangBytes(data)
 	// Binary Lua 5.5 chunk.
 	if len(data) >= 4 && data[0] == 0x1b && data[1] == 'L' && data[2] == 'u' && data[3] == 'a' {
 		return moelua.LoadChunk(data)
-	}
-	// Strip leading '#' shebang line (preserving line count by keeping '\n').
-	if len(data) > 0 && data[0] == '#' {
-		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
-			data = data[idx:]
-		} else {
-			data = nil
-		}
 	}
 	ch, err := moelua.Compile(chunkName, string(data))
 	if err != nil {

@@ -14,9 +14,17 @@ import (
 // Contrib extends a spacenet Node with opt-in Lua modules, services, and subsystems.
 type Contrib = contrib.Contrib
 
+// LuaProfile configures a named Lua actor VM factory backed by its own compacted
+// *moelua.Template, library subset, isolated VFS/CodeCache, capability scope,
+// memory limit, and lifecycle hooks.
+type LuaProfile = runtime.LuaProfile
+
 type nodeConfig struct {
-	rt       runtime.Config
-	contribs []*contrib.Contrib
+	rt           runtime.Config
+	contribs     []*contrib.Contrib
+	userPreloads map[string]moelua.GoFunc
+	userServices map[string]runtime.ServiceFactory
+	luaProfiles  map[string]runtime.LuaProfile
 }
 
 // Option configures a spacenet Node.
@@ -111,6 +119,45 @@ func WithContrib(contribs ...*Contrib) Option {
 	}
 }
 
+// WithPreload registers a Node-level Lua package.preload module loader.
+// Entries registered with WithPreload override contrib preloads of the same name.
+func WithPreload(name string, loader moelua.GoFunc) Option {
+	return func(c *nodeConfig) {
+		if name == "" || loader == nil {
+			return
+		}
+		if c.userPreloads == nil {
+			c.userPreloads = make(map[string]moelua.GoFunc)
+		}
+		c.userPreloads[name] = loader
+	}
+}
+
+// WithService registers a native Go service factory on the Node.
+// Entries registered with WithService override contrib services of the same name.
+func WithService(name string, factory runtime.ServiceFactory) Option {
+	return func(c *nodeConfig) {
+		if name == "" || factory == nil {
+			return
+		}
+		if c.userServices == nil {
+			c.userServices = make(map[string]runtime.ServiceFactory)
+		}
+		c.userServices[name] = factory
+	}
+}
+
+// WithLuaProfile registers a named Lua VM factory configured by profile
+// (launchable via Launch(name, param) or Lua skynet.launch(name, ...)).
+func WithLuaProfile(name string, profile LuaProfile) Option {
+	return func(c *nodeConfig) {
+		if c.luaProfiles == nil {
+			c.luaProfiles = make(map[string]runtime.LuaProfile)
+		}
+		c.luaProfiles[name] = profile.Clone()
+	}
+}
+
 // Node is a running spacenet actor runtime instance.
 type Node struct {
 	rt *runtime.Node
@@ -130,8 +177,12 @@ func New(opts ...Option) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		cfg.rt.Preloads = make(map[string]moelua.GoFunc)
-		cfg.rt.Services = make(map[string]runtime.ServiceFactory)
+		if cfg.rt.Preloads == nil {
+			cfg.rt.Preloads = make(map[string]moelua.GoFunc)
+		}
+		if cfg.rt.Services == nil {
+			cfg.rt.Services = make(map[string]runtime.ServiceFactory)
+		}
 		for _, c := range ordered {
 			if cfs := c.FS(); cfs != nil {
 				cfg.rt.ContribFS = append(cfg.rt.ContribFS, cfs)
@@ -149,6 +200,25 @@ func New(opts ...Option) (*Node, error) {
 				})
 			}
 		}
+	}
+	if len(cfg.userPreloads) > 0 {
+		if cfg.rt.Preloads == nil {
+			cfg.rt.Preloads = make(map[string]moelua.GoFunc, len(cfg.userPreloads))
+		}
+		for name, fn := range cfg.userPreloads {
+			cfg.rt.Preloads[name] = fn
+		}
+	}
+	if len(cfg.userServices) > 0 {
+		if cfg.rt.Services == nil {
+			cfg.rt.Services = make(map[string]runtime.ServiceFactory, len(cfg.userServices))
+		}
+		for name, factory := range cfg.userServices {
+			cfg.rt.Services[name] = factory
+		}
+	}
+	if len(cfg.luaProfiles) > 0 {
+		cfg.rt.LuaProfiles = cfg.luaProfiles
 	}
 	rt, err := runtime.NewNode(cfg.rt)
 	if err != nil {
@@ -177,6 +247,27 @@ func (n *Node) Run(ctx context.Context) error {
 // Launch spawns a service directly (e.g. n.Launch("snlua", "myservice arg1")).
 func (n *Node) Launch(serviceName, param string) (uint32, error) {
 	return n.rt.Launch(serviceName, param)
+}
+
+// LaunchWith creates and launches an actor directly from handler without
+// registering a global service name.
+func (n *Node) LaunchWith(label string, handler runtime.ServiceHandler, param string) (uint32, error) {
+	return n.rt.LaunchWith(label, handler, param)
+}
+
+// NewLuaTemplate compiles a reusable Lua VM factory for profile on this Node.
+func (n *Node) NewLuaTemplate(profile LuaProfile) (*runtime.LuaTemplate, error) {
+	return n.rt.NewLuaTemplate(profile)
+}
+
+// RegisterService registers or replaces a named ServiceFactory on a running Node.
+func (n *Node) RegisterService(name string, factory runtime.ServiceFactory) error {
+	return n.rt.RegisterService(name, factory)
+}
+
+// UnregisterService removes a named ServiceFactory from a running Node.
+func (n *Node) UnregisterService(name string) {
+	n.rt.UnregisterService(name)
 }
 
 // Call sends a PTYPE_LUA RPC call from Go to a named (".svc") or hex (":00000005") service.
