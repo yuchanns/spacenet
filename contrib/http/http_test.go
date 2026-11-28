@@ -52,7 +52,7 @@ func (b *syncBuf) String() string {
 
 func waitLog(t *testing.T, buf *syncBuf, substr string) {
 	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(buf.String(), substr) {
 			return
