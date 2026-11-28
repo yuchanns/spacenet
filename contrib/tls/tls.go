@@ -124,7 +124,7 @@ func managerFromState(s *moelua.State) (*tlsManager, *runtime.Actor, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	mgr, ok := actor.Node().Ext(extKey).(*tlsManager)
+	mgr, ok := actor.Node().Ext[*tlsManager](extKey)
 	if !ok || mgr == nil {
 		return nil, nil, errors.New("tls contrib not initialized on node")
 	}

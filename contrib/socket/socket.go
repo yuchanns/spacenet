@@ -71,8 +71,7 @@ func managerFromState(s *moelua.State) (*manager, *runtime.Actor, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	v := actor.Node().Ext(extKey)
-	mgr, ok := v.(*manager)
+	mgr, ok := actor.Node().Ext[*manager](extKey)
 	if !ok || mgr == nil {
 		return nil, nil, errors.New("socket contrib not initialized on node")
 	}

@@ -48,7 +48,7 @@ func initDebugNode(node *runtime.Node) (io.Closer, error) {
 }
 
 func nodeDebugState(node *runtime.Node) *debugNodeState {
-	if st, ok := node.Ext(extKeyDebugState).(*debugNodeState); ok && st != nil {
+	if st, ok := node.Ext[*debugNodeState](extKeyDebugState); ok && st != nil {
 		return st
 	}
 	return &debugNodeState{}

@@ -353,3 +353,33 @@ func (c *callbackService) Dispatch(a *Actor, m *Message) error {
 }
 func (c *callbackService) Signal(_ *Actor, _ int) {}
 func (c *callbackService) Close(_ *Actor)         {}
+
+func TestNodeExtGeneric(t *testing.T) {
+	n, err := NewNode(Config{Threads: 1, LogOutput: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+
+	type state struct{ id int }
+	if got, ok := n.Ext[*state]("missing"); ok || got != nil {
+		t.Fatalf("missing key: got (%v, %v), want (nil, false)", got, ok)
+	}
+
+	want := &state{id: 42}
+	n.SetExt("k", want)
+	if got, ok := n.Ext[*state]("k"); !ok || got != want {
+		t.Fatalf("matching type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if got, ok := n.Ext[string]("k"); ok || got != "" {
+		t.Fatalf("mismatched type: got (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := n.Ext[any]("k"); !ok || got != want {
+		t.Fatalf("any type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+
+	n.SetExt("nilval", nil)
+	if got, ok := n.Ext[*state]("nilval"); ok || got != nil {
+		t.Fatalf("nil value: got (%v, %v), want (nil, false)", got, ok)
+	}
+}

@@ -84,7 +84,7 @@ func New() *contrib.Contrib {
 }
 
 func getStore(n *runtime.Node) (*nodeStore, error) {
-	st, ok := n.Ext(extKey).(*nodeStore)
+	st, ok := n.Ext[*nodeStore](extKey)
 	if !ok || st == nil {
 		return nil, errors.New("sproto contrib not initialized on node")
 	}
