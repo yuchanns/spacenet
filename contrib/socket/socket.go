@@ -721,10 +721,8 @@ func extractSocketEvent(node *runtime.Node, actor *runtime.Actor, v moelua.Value
 			}
 		}
 	case runtime.KindSocketEvt:
-		if payload, ok := node.Objs().Get(runtime.KindSocketEvt, tok); ok {
-			if ev, ok := payload.(*SocketEvent); ok {
-				return ev, nil
-			}
+		if ev, ok := node.Objs().Get[*SocketEvent](runtime.KindSocketEvt, tok); ok {
+			return ev, nil
 		}
 	}
 	return nil, errors.New("not a socket event")

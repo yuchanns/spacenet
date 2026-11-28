@@ -241,11 +241,10 @@ func preloadSTM(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 		if !ok || tok == 0 {
 			return nil, errors.New("invalid stm pointer")
 		}
-		v, ok := node.Objs().Get(runtime.KindSTMObject, tok)
+		obj, ok := node.Objs().Get[*stmObject](runtime.KindSTMObject, tok)
 		if !ok {
 			return nil, errors.New("invalid stm pointer")
 		}
-		obj := v.(*stmObject)
 		mt := st.GetMetatableByName(metaSTMReader)
 		ud, err := st.NewUserdataWithMeta(&stmReaderBox{obj: obj}, mt)
 		if err != nil {

@@ -224,38 +224,46 @@ func (r *ObjRegistry) Put(kind TokenKind, val any) uint64 {
 	return MakeToken(kind, gen, slot)
 }
 
-func (r *ObjRegistry) Get(expectedKind TokenKind, tok uint64) (any, bool) {
+// Get retrieves the registered object for tok and asserts it to T.
+func (r *ObjRegistry) Get[T any](expectedKind TokenKind, tok uint64) (T, bool) {
+	var zero T
 	kind, gen, slot := SplitToken(tok)
 	if kind != expectedKind {
-		return nil, false
+		return zero, false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if int(slot) >= len(r.slots) {
-		return nil, false
+		return zero, false
 	}
 	s := &r.slots[slot]
 	if !s.used || s.gen != gen || s.kind != expectedKind {
-		return nil, false
+		return zero, false
 	}
-	return s.val, true
+	v, ok := s.val.(T)
+	return v, ok
 }
 
-func (r *ObjRegistry) Delete(expectedKind TokenKind, tok uint64) (any, bool) {
+// Take atomically removes and returns the registered object for tok if it matches expectedKind and T.
+func (r *ObjRegistry) Take[T any](expectedKind TokenKind, tok uint64) (T, bool) {
+	var zero T
 	kind, gen, slot := SplitToken(tok)
 	if kind != expectedKind {
-		return nil, false
+		return zero, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if int(slot) >= len(r.slots) {
-		return nil, false
+		return zero, false
 	}
 	s := &r.slots[slot]
 	if !s.used || s.gen != gen || s.kind != expectedKind {
-		return nil, false
+		return zero, false
 	}
-	val := s.val
+	v, ok := s.val.(T)
+	if !ok {
+		return zero, false
+	}
 	s.val = nil
 	s.used = false
 	s.gen = (s.gen + 1) & 0xffffff
@@ -263,7 +271,32 @@ func (r *ObjRegistry) Delete(expectedKind TokenKind, tok uint64) (any, bool) {
 		s.gen = 1
 	}
 	r.free = append(r.free, slot)
-	return val, true
+	return v, true
+}
+
+// Delete removes the registered object for tok if it matches expectedKind.
+func (r *ObjRegistry) Delete(expectedKind TokenKind, tok uint64) bool {
+	kind, gen, slot := SplitToken(tok)
+	if kind != expectedKind {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if int(slot) >= len(r.slots) {
+		return false
+	}
+	s := &r.slots[slot]
+	if !s.used || s.gen != gen || s.kind != expectedKind {
+		return false
+	}
+	s.val = nil
+	s.used = false
+	s.gen = (s.gen + 1) & 0xffffff
+	if s.gen == 0 {
+		s.gen = 1
+	}
+	r.free = append(r.free, slot)
+	return true
 }
 
 // Count returns the number of live entries of the given TokenKind.

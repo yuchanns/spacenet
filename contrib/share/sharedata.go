@@ -199,11 +199,11 @@ func preloadShareDataCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		if !ok || tok == 0 {
 			return nil, errors.New("Need a conf object")
 		}
-		v, ok := node.Objs().Get(runtime.KindShareDataNode, tok)
+		t, ok := node.Objs().Get[*sdTable](runtime.KindShareDataNode, tok)
 		if !ok {
 			return nil, errors.New("Need a conf object")
 		}
-		return v.(*sdTable), nil
+		return t, nil
 	}
 
 	tbl := s.NewTable(0, 14)

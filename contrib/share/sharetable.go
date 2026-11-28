@@ -492,11 +492,10 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 		if !ok || tok == 0 {
 			return nil, errors.New("invalid matrix pointer")
 		}
-		v, ok := node.Objs().Get(runtime.KindShareMatrix, tok)
+		root, ok := node.Objs().Get[*stTableData](runtime.KindShareMatrix, tok)
 		if !ok {
 			return nil, errors.New("matrix pointer not found or closed")
 		}
-		root := v.(*stTableData)
 		ms := &matState{
 			s:         st,
 			sharedReg: getSharedRegistry(st),

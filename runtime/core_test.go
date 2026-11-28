@@ -383,3 +383,34 @@ func TestNodeExtGeneric(t *testing.T) {
 		t.Fatalf("nil value: got (%v, %v), want (nil, false)", got, ok)
 	}
 }
+
+func TestObjRegistryGeneric(t *testing.T) {
+	reg := NewObjRegistry()
+	type item struct{ id int }
+	want := &item{id: 7}
+	tok := reg.Put(KindSprotoObj, want)
+
+	if got, ok := reg.Get[*item](KindSprotoObj, tok); !ok || got != want {
+		t.Fatalf("Get matching type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if got, ok := reg.Get[string](KindSprotoObj, tok); ok || got != "" {
+		t.Fatalf("Get mismatched type: got (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := reg.Take[string](KindSprotoObj, tok); ok || got != "" {
+		t.Fatalf("Take mismatched type must not remove entry: got (%q, %v)", got, ok)
+	}
+	if got, ok := reg.Take[*item](KindSprotoObj, tok); !ok || got != want {
+		t.Fatalf("Take matching type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if _, ok := reg.Get[*item](KindSprotoObj, tok); ok {
+		t.Fatal("Get after Take succeeded, expected false")
+	}
+
+	tok2 := reg.Put(KindSprotoObj, want)
+	if !reg.Delete(KindSprotoObj, tok2) {
+		t.Fatal("Delete live token returned false")
+	}
+	if reg.Delete(KindSprotoObj, tok2) {
+		t.Fatal("Delete already-deleted token returned true")
+	}
+}
