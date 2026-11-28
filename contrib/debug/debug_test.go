@@ -104,12 +104,13 @@ spacenet.start(function()
 	assert(minfo[spacenet.self()] and minfo[spacenet.self()] > 0, "memory.info missing self")
 	assert(minfo[worker] and minfo[worker] > 0, "memory.info missing worker service")
 
-	-- debugchannel.sethook preserves debug.getinfo(2) frame depth and invokes
-	-- coroutine.yield() when the callback returns truthy.
+	-- debugchannel.sethook preserves debug.getinfo(2) frame depth and suspends
+	-- coroutines via CIST_HOOKYIELD when the callback returns truthy on line/count.
 	local seen_src = nil
 	local function sample_fn()
 		local x = 1
-		return x + 1
+		local y = x + 41
+		return y
 	end
 	local co_cont = coroutine.create(function()
 		dc.sethook(function(ev)
@@ -123,21 +124,58 @@ spacenet.start(function()
 		return r
 	end)
 	local ok_c, res_c = coroutine.resume(co_cont)
-	assert(ok_c and res_c == 2, "sethook falsy path failed: " .. tostring(res_c))
+	assert(ok_c and res_c == 42, "sethook falsy path failed: " .. tostring(res_c))
 	assert(seen_src and seen_src:find("dbg_main"), "sethook getinfo(2) wrong frame: " .. tostring(seen_src))
 
-	local ran_past_break = false
+	-- External thread breakpoint suspend, step, and resume without re-firing the same line.
+	local hit_lines = {}
+	local brk_src = nil
 	local co_brk = coroutine.create(function()
-		dc.sethook(function(ev)
-			if ev == "line" then
-				return true
-			end
-		end, "l")
-		local _ = sample_fn()
-		ran_past_break = true
+		return sample_fn()
 	end)
-	local ok_b = coroutine.resume(co_brk)
-	assert(not ran_past_break, "sethook must not silently execute past a truthy breakpoint return (ok=" .. tostring(ok_b) .. ")")
+	dc.sethook(co_brk, function(ev, line)
+		if ev == "line" then
+			if not brk_src then
+				brk_src = debug.getinfo(2, "S").short_src
+			end
+			hit_lines[#hit_lines + 1] = line
+			return true
+		end
+	end, "l")
+
+	-- Step twice across breakpoints, verifying clean suspend and forward line progress.
+	local ok1, v1 = coroutine.resume(co_brk)
+	assert(ok1 and v1 == nil and coroutine.status(co_brk) == "suspended", "first breakpoint did not suspend cleanly")
+	local ok2, v2 = coroutine.resume(co_brk)
+	assert(ok2 and v2 == nil and coroutine.status(co_brk) == "suspended", "second breakpoint did not suspend cleanly")
+	assert(#hit_lines == 2 and hit_lines[1] ~= hit_lines[2], "breakpoint did not advance lines: " .. tostring(hit_lines[1]) .. "," .. tostring(hit_lines[2]))
+	assert(brk_src and brk_src:find("dbg_main"), "breakpoint getinfo(2) wrong frame: " .. tostring(brk_src))
+
+	-- Clear hook and resume to completion.
+	dc.sethook(co_brk)
+	local ok_end, res_end = coroutine.resume(co_brk)
+	assert(ok_end and res_end == 42 and coroutine.status(co_brk) == "dead", "resume after clearing hook failed: " .. tostring(res_end))
+
+	-- Count hook suspend and resume.
+	local count_hits = 0
+	local co_cnt = coroutine.create(function()
+		local sum = 0
+		for i = 1, 20 do
+			sum = sum + i
+		end
+		return sum
+	end)
+	dc.sethook(co_cnt, function(ev)
+		if ev == "count" then
+			count_hits = count_hits + 1
+			return true
+		end
+	end, "", 5)
+	local ok_cnt1 = coroutine.resume(co_cnt)
+	assert(ok_cnt1 and coroutine.status(co_cnt) == "suspended" and count_hits == 1, "count hook did not suspend cleanly")
+	dc.sethook(co_cnt)
+	local ok_cnt2, sum_res = coroutine.resume(co_cnt)
+	assert(ok_cnt2 and sum_res == 210 and coroutine.status(co_cnt) == "dead", "count hook resume failed: " .. tostring(sum_res))
 
 	-- Basic channel write/read, single-consumer connect limit, and idempotent release.
 	local w, ptr = dc.create()

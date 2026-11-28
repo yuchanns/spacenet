@@ -1,4 +1,4 @@
-// Package debug provides Skynet's debug_console, skynet.memory, skynet.debugchannel,
+// Package debug provides spacenet.memory, spacenet.debugchannel, debug_console,
 // and remote debugging/hot-injection Lua libraries and services.
 package debug
 
@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	stdruntime "runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -395,28 +396,41 @@ func currentCoroutine(s *moelua.State) (moelua.Value, error) {
 	return res[0], nil
 }
 
+func makeHookMask(smask string, count int) moelua.HookMask {
+	var mask moelua.HookMask
+	if strings.ContainsRune(smask, 'c') {
+		mask |= moelua.HookMaskCall
+	}
+	if strings.ContainsRune(smask, 'r') {
+		mask |= moelua.HookMaskRet
+	}
+	if strings.ContainsRune(smask, 'l') {
+		mask |= moelua.HookMaskLine
+	}
+	if count > 0 {
+		mask |= moelua.HookMaskCount
+	}
+	return mask
+}
+
 // lDebugSetHook mirrors lualib-src/lua-debugchannel.c:db_sethook / hookf:
 // registers a per-thread Lua hook callback in a weak-key registry table and
-// invokes coroutine.yield() whenever the callback returns a truthy value.
-// Because the native hook wrapper does not push a Lua call frame, debug.getinfo(2)
-// inside the callback observes the debugged Lua frame directly. Note that
-// moelua v0.1.0 increments nny inside fireHook, so yielding from a debug hook
-// currently surfaces an explicit C-call boundary error rather than silently
-// skipping breakpoints.
+// installs a Go HostHookFunc via moelua's SetHostHook. Whenever the Lua
+// callback returns a truthy value on a line or count event, returning
+// moelua.ErrHookYield suspends the coroutine with zero yielded values
+// (PUC-Rio Lua 5.5.1 CIST_HOOKYIELD semantics) while preserving debug.getinfo(2).
 func lDebugSetHook(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-	dbg := st.TableOf(st.GetGlobal("debug"))
-	if dbg == nil {
-		return nil, errors.New("debug library not loaded")
-	}
-	sh := dbg.GetString("sethook")
-	if sh.IsNil() {
-		return nil, errors.New("debug.sethook not available")
-	}
-
-	var targetCo moelua.Value
-	argIdx := 0
+	var (
+		targetCo moelua.Value
+		targetTh *moelua.Thread
+		argIdx   int
+	)
 	if len(args) > 0 && args[0].IsThread() {
 		targetCo = args[0]
+		targetTh = st.ThreadOf(targetCo)
+		if targetTh == nil {
+			return nil, errors.New("bad argument #1 to 'sethook' (invalid thread)")
+		}
 		argIdx = 1
 	} else {
 		var err error
@@ -428,13 +442,21 @@ func lDebugSetHook(st *moelua.State, args []moelua.Value) ([]moelua.Value, error
 	coPin := st.Pin(targetCo)
 	defer coPin.Release()
 
+	setHook := func(fn moelua.HostHookFunc, mask moelua.HookMask, count int) {
+		if targetTh != nil {
+			targetTh.SetHostHook(fn, mask, count)
+		} else {
+			st.SetHostHook(fn, mask, count)
+		}
+	}
+
 	hookTbl := getDebugHookTable(st)
 	if len(args) <= argIdx || args[argIdx].IsNil() {
 		if hookTbl != nil {
 			_ = hookTbl.Set(targetCo, moelua.Nil())
 		}
-		_, err := st.Call(sh, targetCo)
-		return nil, err
+		setHook(nil, 0, 0)
+		return nil, nil
 	}
 
 	userFn := args[argIdx]
@@ -444,52 +466,74 @@ func lDebugSetHook(st *moelua.State, args []moelua.Value) ([]moelua.Value, error
 	if len(args) <= argIdx+1 || !args[argIdx+1].IsString() {
 		return nil, errors.New("bad argument to 'sethook' (mask string expected)")
 	}
-	mask := args[argIdx+1]
-	var count moelua.Value
-	hasCount := len(args) > argIdx+2 && !args[argIdx+2].IsNil()
-	if hasCount {
-		count = args[argIdx+2]
+	smask, _ := st.ToString(args[argIdx+1])
+
+	count := 0
+	if len(args) > argIdx+2 && !args[argIdx+2].IsNil() {
+		switch {
+		case args[argIdx+2].IsInt():
+			c := args[argIdx+2].Int()
+			if c > 0 {
+				if c > math.MaxInt {
+					count = math.MaxInt
+				} else {
+					count = int(c)
+				}
+			}
+		case args[argIdx+2].IsFloat():
+			f := args[argIdx+2].Float()
+			if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f {
+				return nil, errors.New("bad argument to 'sethook' (number has no integer representation)")
+			}
+			if f > 0 {
+				if f >= float64(math.MaxInt) {
+					count = math.MaxInt
+				} else {
+					count = int(f)
+				}
+			}
+		default:
+			return nil, errors.New("bad argument to 'sethook' (number expected)")
+		}
+	}
+
+	mask := makeHookMask(smask, count)
+	if mask == 0 {
+		if hookTbl != nil {
+			_ = hookTbl.Set(targetCo, moelua.Nil())
+		}
+		setHook(nil, 0, 0)
+		return nil, nil
 	}
 
 	if hookTbl != nil {
 		_ = hookTbl.Set(targetCo, userFn)
 	}
 
-	wrapper := st.NewFunc("debugchannel.hookf", func(hst *moelua.State, hargs []moelua.Value) ([]moelua.Value, error) {
-		co, err := currentCoroutine(hst)
-		if err != nil {
-			return nil, err
-		}
+	coKey := targetCo
+	hostHook := func(hst *moelua.State, event moelua.HookEvent, line int) error {
 		ht := getDebugHookTable(hst)
 		if ht == nil {
-			return nil, nil
+			return nil
 		}
-		fn := ht.Get(co)
-		if fn.IsNil() {
-			return nil, nil
+		fn := ht.Get(coKey)
+		if !fn.IsFunction() {
+			return nil
 		}
-		res, err := hst.Call(fn, hargs...)
+		lineVal := moelua.Nil()
+		if line >= 0 {
+			lineVal = moelua.Int(int64(line))
+		}
+		res, err := hst.Call1(fn, hst.String(event.String()), lineVal)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if len(res) > 0 && !res[0].IsFalsy() {
-			coro := hst.TableOf(hst.GetGlobal("coroutine"))
-			if coro != nil {
-				if yieldFn := coro.GetString("yield"); !yieldFn.IsNil() {
-					return hst.Call(yieldFn)
-				}
-			}
-			return nil, errors.New("debugchannel.sethook: attempt to yield from debug hook")
+		if !res.IsFalsy() {
+			return moelua.ErrHookYield
 		}
-		return nil, nil
-	})
-	wrapPin := st.Pin(wrapper)
-	defer wrapPin.Release()
-
-	if hasCount {
-		_, err := st.Call(sh, targetCo, wrapper, mask, count)
-		return nil, err
+		return nil
 	}
-	_, err := st.Call(sh, targetCo, wrapper, mask)
-	return nil, err
+
+	setHook(hostHook, mask, count)
+	return nil, nil
 }

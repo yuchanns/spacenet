@@ -2,6 +2,7 @@ package share_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -563,9 +564,18 @@ end)
 `)},
 			"service/ds_gc_main.lua": &fstest.MapFile{Data: []byte(`
 local spacenet = require "spacenet"
+require "spacenet.manager"
 local builder = require "spacenet.datasheet.builder"
 
 spacenet.start(function()
+	spacenet.dispatch("lua", function(_, _, cmd)
+		if cmd == "gc" then
+			collectgarbage("collect")
+			spacenet.retpack(true)
+		end
+	end)
+	spacenet.register(".ds_gc_main")
+
 	-- Builder + long-lived consumer + transient child consumer (verifying sheets.__gc -> close).
 	builder.new("cfg", { ver = 1, sub = { x = 10 } })
 	spacenet.newservice("ds_gc_child")
@@ -628,7 +638,15 @@ end)
 			t.Fatalf("datasheet gc test errored:\n%s", logs.String())
 		}
 
-		// Only the latest versions of "cfg" and "unused" should remain live.
+		// Only the latest versions of "cfg" and "unused" should remain live once
+		// asynchronous datasheet release/collect notifications finish draining.
+		deadline := time.Now().Add(3 * time.Second)
+		for node.Runtime().Objs().Count(runtime.KindDatasheetDoc) != 2 && time.Now().Before(deadline) {
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			_, _ = node.Call(ctx, ".ds_gc_main", "gc")
+			cancel()
+			time.Sleep(15 * time.Millisecond)
+		}
 		if got := node.Runtime().Objs().Count(runtime.KindDatasheetDoc); got != 2 {
 			t.Fatalf("expected exactly 2 live datasheet documents after GC, got %d\nlogs:\n%s", got, logs.String())
 		}
