@@ -647,3 +647,180 @@ func TestLuaProfileInitStateFailureSkipsCloseFuncAndValidation(t *testing.T) {
 		t.Fatal("expected RegisterService on closed node to fail")
 	}
 }
+
+type mutableMapFS struct {
+	mu    sync.RWMutex
+	files map[string][]byte
+}
+
+func (m *mutableMapFS) Open(name string) (fs.File, error) {
+	m.mu.RLock()
+	data, ok := m.files[name]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	sub := fstest.MapFS{name: &fstest.MapFile{Data: append([]byte(nil), data...)}}
+	return sub.Open(name)
+}
+
+func (m *mutableMapFS) Set(name string, data []byte) {
+	m.mu.Lock()
+	m.files[name] = append([]byte(nil), data...)
+	m.mu.Unlock()
+}
+
+func TestLuaProfileInitStateEarlyMessageAndFreshReloadAndCrossNodeRejection(t *testing.T) {
+	// 1. Early message sent during InitState must arrive AFTER the launch message.
+	t.Run("InitStateEarlyMessageOrdering", func(t *testing.T) {
+		n, err := NewNode(Config{Threads: 2, LogOutput: io.Discard, DisableOSFS: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer n.Close()
+
+		var gotLaunch string
+		var gotEarly string
+		done := make(chan struct{})
+		lt, err := n.NewLuaTemplate(LuaProfile{
+			Libs:             moelua.LibSafe | moelua.LibPackageSafe,
+			IsolatedFS:       true,
+			DisableCore:      true,
+			DisableCodeCache: true,
+			DisableProfile:   true,
+			InitState: func(actor *Actor, _ *moelua.State) error {
+				// Send an early message directly to self before Init finishes.
+				if ret := actor.Node().Send(nil, 0, actor.Handle(), PTypeText, 0, []byte("early-msg")); ret < 0 {
+					return fmt.Errorf("early send failed: %d", ret)
+				}
+				return nil
+			},
+			LoaderFunc: func(_ *Actor, _ *moelua.State, param string) error {
+				gotLaunch = param
+				return nil
+			},
+			DispatchFunc: func(actor *Actor, _ *moelua.State, msg *Message) error {
+				gotEarly = string(msg.Data)
+				close(done)
+				actor.Node().Kill(actor, 0)
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := n.LaunchWith("early-order", lt.NewService(), "launch-arg"); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for early message dispatch")
+		}
+		if gotLaunch != "launch-arg" {
+			t.Fatalf("LoaderFunc param = %q, want %q", gotLaunch, "launch-arg")
+		}
+		if gotEarly != "early-msg" {
+			t.Fatalf("DispatchFunc early msg = %q, want %q", gotEarly, "early-msg")
+		}
+	})
+
+	// 2. InstallFreshVFSLoaders on a LibPackageSafe profile replaces the cached searcher in place.
+	t.Run("LibPackageSafeFreshVFSReload", func(t *testing.T) {
+		mfs := &mutableMapFS{files: map[string][]byte{
+			"dyn.lua": []byte(`return "v1"`),
+		}}
+		n, err := NewNode(Config{Threads: 2, LogOutput: io.Discard, DisableOSFS: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer n.Close()
+
+		var v1, v2 string
+		done := make(chan error, 1)
+		var lt *LuaTemplate
+		lt, err = n.NewLuaTemplate(LuaProfile{
+			Libs:             moelua.LibSafe | moelua.LibPackageSafe,
+			IsolatedFS:       true,
+			FS:               []fs.FS{mfs},
+			DisableCore:      true,
+			DisableCodeCache: true,
+			DisableProfile:   true,
+			LoaderFunc: func(actor *Actor, s *moelua.State, _ string) error {
+				r1, err := s.DoString(`return require("dyn")`)
+				if err != nil {
+					done <- err
+					return err
+				}
+				v1, _ = s.ToString(r1[0])
+
+				// Mutate backing FS, clear package.loaded["dyn"], and switch to fresh VFS loaders.
+				mfs.Set("dyn.lua", []byte(`return "v2"`))
+				lt.InstallFreshVFSLoaders(s)
+				r2, err := s.DoString(`
+					package.loaded["dyn"] = nil
+					return require("dyn")
+				`)
+				if err != nil {
+					done <- err
+					return err
+				}
+				v2, _ = s.ToString(r2[0])
+				done <- nil
+				actor.Node().Kill(actor, 0)
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := n.LaunchWith("fresh-reload", lt.NewService(), ""); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for fresh VFS reload")
+		}
+		if v1 != "v1" || v2 != "v2" {
+			t.Fatalf("got v1=%q v2=%q, want v1=v1 v2=v2", v1, v2)
+		}
+	})
+
+	// 3. Reject LuaTemplate created on Node A when launched on Node B.
+	t.Run("RejectCrossNodeLuaTemplate", func(t *testing.T) {
+		nodeA, err := NewNode(Config{Threads: 2, LogOutput: io.Discard, DisableOSFS: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer nodeA.Close()
+		nodeB, err := NewNode(Config{Threads: 2, LogOutput: io.Discard, DisableOSFS: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer nodeB.Close()
+
+		tmplA, err := nodeA.NewLuaTemplate(LuaProfile{
+			Libs:             moelua.LibSafe | moelua.LibPackageSafe,
+			IsolatedFS:       true,
+			DisableCore:      true,
+			DisableCodeCache: true,
+			DisableProfile:   true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := nodeB.LaunchWith("cross-node", tmplA.NewService(), ""); err == nil || !strings.Contains(err.Error(), "different Node") {
+			t.Fatalf("expected cross-node rejection error, got %v", err)
+		}
+		if err := nodeB.RegisterService("cross", tmplA.NewService); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := nodeB.Launch("cross", ""); err == nil || !strings.Contains(err.Error(), "different Node") {
+			t.Fatalf("expected cross-node Launch error, got %v", err)
+		}
+	})
+}

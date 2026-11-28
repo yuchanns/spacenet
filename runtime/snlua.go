@@ -106,8 +106,24 @@ func (lt *LuaTemplate) installVFSLoaders(s *moelua.State, bypassCache bool) {
 		}
 	} else if lt.libs&moelua.LibPackageSafe != 0 {
 		// Under LibPackageSafe, keep package.searchpath and OS searchers absent
-		// and append the template's LayeredFS/CodeCache searcher after preload.
-		s.AddSearcher("spacenet.lua_searcher", searcherFn)
+		// and install (or replace in place on fresh reload) the template's
+		// LayeredFS/CodeCache searcher.
+		if searchers := s.TableOf(pkg.GetString("searchers")); searchers != nil {
+			reg := s.Registry()
+			idx := int64(0)
+			if reg != nil {
+				if iv := reg.GetString("spacenet_vfs_searcher_idx"); iv.IsInt() && iv.Int() > 0 && iv.Int() <= searchers.Len()+1 {
+					idx = iv.Int()
+				}
+			}
+			if idx == 0 {
+				idx = searchers.Len() + 1
+				if reg != nil {
+					_ = reg.SetString("spacenet_vfs_searcher_idx", moelua.Int(idx))
+				}
+			}
+			_ = searchers.SetInt(idx, s.NewFunc("spacenet.lua_searcher", searcherFn))
+		}
 	}
 }
 
@@ -361,6 +377,8 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 	if lt == nil {
 		lt = n.defaultLuaTmpl
 		l.tmpl = lt
+	} else if lt.node != n {
+		return errors.New("spacenet: LuaTemplate belongs to a different Node")
 	}
 
 	useJIT := n.cfg.JIT
@@ -433,6 +451,16 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 		s.SetMemoryLimit(lt.memLimit)
 	}
 
+	// Queue the initial launch message BEFORE invoking InitState so any message
+	// sent to this actor during InitState (or via a handle published by InitState)
+	// cannot overtake the launch message (matching snlua_init ordering).
+	actor.queue.Push(Message{
+		Source:  0,
+		Session: 0,
+		Type:    PTypeText,
+		Data:    []byte(param),
+	}, nil)
+
 	if lt.initState != nil {
 		if err := lt.initState(actor, s); err != nil {
 			l.Close(actor)
@@ -441,15 +469,7 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 	}
 
 	l.initOK = true
-
-	// Queue the initial launch message to self (must be the first message, matching snlua_init).
 	actor.SetMemoryUsage(s.MemoryUsage())
-	actor.queue.Push(Message{
-		Source:  0,
-		Session: 0,
-		Type:    PTypeText,
-		Data:    []byte(param),
-	}, nil)
 	return nil
 }
 
