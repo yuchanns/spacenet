@@ -154,8 +154,8 @@ func extractDocToken(st *moelua.State, v moelua.Value) (uint64, bool) {
 	if tok, ok := runtime.ExtractToken(v); ok {
 		return tok, tok != 0
 	}
-	if data, ok := st.CheckUserdata(v, dsDocHandleMeta); ok {
-		tok := data.(*dsDocHandle).LightUDToken()
+	if h, ok := st.CheckUserdata[*dsDocHandle](v, dsDocHandleMeta); ok {
+		tok := h.LightUDToken()
 		return tok, tok != 0
 	}
 	return 0, false
@@ -190,8 +190,7 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			if len(args) == 0 {
 				return nil, nil
 			}
-			if v, ok := st.CheckUserdata(args[0], dsDocHandleMeta); ok {
-				h := v.(*dsDocHandle)
+			if h, ok := st.CheckUserdata[*dsDocHandle](args[0], dsDocHandleMeta); ok {
 				if h.doc != nil {
 					h.doc.release()
 					h.doc = nil
@@ -207,8 +206,7 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			if len(args) == 0 {
 				return nil, nil
 			}
-			if v, ok := st.CheckUserdata(args[0], dsProxyUDMeta); ok {
-				p := v.(*dsProxy)
+			if p, ok := st.CheckUserdata[*dsProxy](args[0], dsProxyUDMeta); ok {
 				if p.doc != nil {
 					p.doc.release()
 					p.doc = nil
@@ -351,11 +349,10 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 	copyFromData := func(st *moelua.State, tblVal moelua.Value) error {
 		pc := st.TableOf(st.Registry().GetString(dsProxyCache))
 		pv := pc.Get(tblVal)
-		v, ok := st.CheckUserdata(pv, dsProxyUDMeta)
+		p, ok := st.CheckUserdata[*dsProxy](pv, dsProxyUDMeta)
 		if !ok {
 			return errors.New("Invalid proxy table")
 		}
-		p := v.(*dsProxy)
 		tbl := st.TableOf(tblVal)
 		if err := copyTable(st, tbl, p); err != nil {
 			return err
@@ -470,11 +467,10 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		}
 		pc := st.TableOf(st.Registry().GetString(dsProxyCache))
 		pv := pc.Get(args[0])
-		rv, ok := st.CheckUserdata(pv, dsProxyUDMeta)
+		rootProxy, ok := st.CheckUserdata[*dsProxy](pv, dsProxyUDMeta)
 		if !ok {
 			return nil, errors.New("Invalid proxy table")
 		}
-		rootProxy := rv.(*dsProxy)
 		oldDoc := rootProxy.doc
 		if oldDoc == nil {
 			return nil, errors.New("Invalid proxy table")
@@ -519,11 +515,10 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 				return nil
 			}
 			pv2 := pc.Get(v)
-			udv, ok := st.CheckUserdata(pv2, dsProxyUDMeta)
+			p, ok := st.CheckUserdata[*dsProxy](pv2, dsProxyUDMeta)
 			if !ok {
 				return nil
 			}
-			p := udv.(*dsProxy)
 			if p.doc != oldDoc {
 				return nil
 			}

@@ -84,7 +84,7 @@ func packOneLua(s *moelua.State, raw *vm.State, buf []byte, v moelua.Value, dept
 		return binary.LittleEndian.AppendUint64(buf, tok), nil
 	case v.IsUserdata():
 		if ud := raw.AsUserdata(v); ud != nil {
-			if tc, ok := raw.UserdataData(ud).(TokenCarrier); ok {
+			if tc, ok := raw.UserdataData[TokenCarrier](ud); ok {
 				buf = append(buf, seriTypeUserdata)
 				return binary.LittleEndian.AppendUint64(buf, tc.LightUDToken()), nil
 			}

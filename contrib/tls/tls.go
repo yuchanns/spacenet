@@ -200,11 +200,7 @@ func checkSSLCtx(s *moelua.State, args []moelua.Value, idx int) (*sslCtx, error)
 	if idx >= len(args) {
 		return nil, errors.New("need sslctx")
 	}
-	v, ok := s.CheckUserdata(args[idx], metaSSLCtx)
-	if !ok {
-		return nil, errors.New("need sslctx")
-	}
-	ctx, ok := v.(*sslCtx)
+	ctx, ok := s.CheckUserdata[*sslCtx](args[idx], metaSSLCtx)
 	if !ok || ctx == nil {
 		return nil, errors.New("need sslctx")
 	}
@@ -449,11 +445,7 @@ func checkTLSSession(s *moelua.State, args []moelua.Value, allowClosed bool) (*t
 	if len(args) == 0 {
 		return nil, errors.New("need tls context")
 	}
-	v, ok := s.CheckUserdata(args[0], metaTLSCtx)
-	if !ok {
-		return nil, errors.New("need tls context")
-	}
-	sess, ok := v.(*tlsSession)
+	sess, ok := s.CheckUserdata[*tlsSession](args[0], metaTLSCtx)
 	if !ok || sess == nil {
 		return nil, errors.New("need tls context")
 	}

@@ -140,11 +140,11 @@ func checkSocketBuffer(s *moelua.State, args []moelua.Value) (*socketBuffer, err
 	if len(args) == 0 || !args[0].IsUserdata() {
 		return nil, errors.New("need buffer object at param 1")
 	}
-	v, ok := s.CheckUserdata(args[0], metaSocketBuffer)
+	buf, ok := s.CheckUserdata[*socketBuffer](args[0], metaSocketBuffer)
 	if !ok {
 		return nil, errors.New("need buffer object at param 1")
 	}
-	return v.(*socketBuffer), nil
+	return buf, nil
 }
 
 func (m *manager) lNewBuffer(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {

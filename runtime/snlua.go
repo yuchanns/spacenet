@@ -34,7 +34,7 @@ func ActorFromState(s *moelua.State) (*Actor, error) {
 	if raw == nil {
 		return nil, errors.New("Init spacenet context first")
 	}
-	a, ok := raw.UserdataData(raw.AsUserdata(v)).(*Actor)
+	a, ok := raw.UserdataData[*Actor](raw.AsUserdata(v))
 	if !ok || a == nil {
 		return nil, errors.New("Init spacenet context first")
 	}
@@ -596,7 +596,7 @@ func snluaFromState(s *moelua.State) (*snluaService, error) {
 		return nil, errors.New("Init spacenet context first")
 	}
 	raw := s.Raw()
-	l, ok := raw.UserdataData(raw.AsUserdata(v)).(*snluaService)
+	l, ok := raw.UserdataData[*snluaService](raw.AsUserdata(v))
 	if !ok || l == nil {
 		return nil, errors.New("Init spacenet context first")
 	}

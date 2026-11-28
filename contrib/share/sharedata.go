@@ -291,8 +291,7 @@ func preloadShareDataCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 				if len(gargs) == 0 {
 					return nil, nil
 				}
-				if v, ok := gst.CheckUserdata(gargs[0], metaShareDataCtrl); ok {
-					c := v.(*sdCtrl)
+				if c, ok := gst.CheckUserdata[*sdCtrl](gargs[0], metaShareDataCtrl); ok {
 					if c.root != nil {
 						c.root.state.ref.Add(-1)
 						c.root = nil
@@ -412,11 +411,10 @@ func preloadShareDataCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		if len(args) == 0 {
 			return nil, nil
 		}
-		v, ok := st.CheckUserdata(args[0], metaShareDataCtrl)
+		c, ok := st.CheckUserdata[*sdCtrl](args[0], metaShareDataCtrl)
 		if !ok {
 			return nil, nil
 		}
-		c := v.(*sdCtrl)
 		if c.update != nil {
 			var uv moelua.Value = moelua.Nil()
 			if c.updateTbl != nil {
@@ -431,11 +429,10 @@ func preloadShareDataCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 		if len(args) < 3 || !args[2].IsTable() {
 			return nil, errors.New("sharedata.update requires (ctrl, newobj, table)")
 		}
-		v, ok := st.CheckUserdata(args[0], metaShareDataCtrl)
+		c, ok := st.CheckUserdata[*sdCtrl](args[0], metaShareDataCtrl)
 		if !ok {
 			return nil, errors.New("expected confctrl userdata")
 		}
-		c := v.(*sdCtrl)
 		nt, err := getSDTable(args, 1)
 		if err != nil {
 			return nil, err
