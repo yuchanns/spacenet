@@ -19,11 +19,10 @@ type mcPackage struct {
 }
 
 func releaseMulticastPkg(node *runtime.Node, pkgTok uint64) error {
-	v, ok := node.Objs().Get(runtime.KindMulticastPkg, pkgTok)
+	pkg, ok := node.Objs().Get[*mcPackage](runtime.KindMulticastPkg, pkgTok)
 	if !ok {
 		return nil
 	}
-	pkg := v.(*mcPackage)
 	rem := pkg.ref.Add(-1)
 	if rem == 0 {
 		node.Objs().Delete(runtime.KindMulticastPkg, pkgTok)
@@ -154,11 +153,10 @@ func preloadMulticastCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			return nil, errors.New("Invalid multicast package")
 		}
 		pkgTok := binary.LittleEndian.Uint64(box[:8])
-		v, ok := node.Objs().Get(runtime.KindMulticastPkg, pkgTok)
+		pkg, ok := node.Objs().Get[*mcPackage](runtime.KindMulticastPkg, pkgTok)
 		if !ok {
 			return nil, errors.New("multicast package not found")
 		}
-		pkg := v.(*mcPackage)
 		return []moelua.Value{
 			runtime.LightUDToken(pkgTok),
 			runtime.LightUDToken(pkg.dataTok),
@@ -176,11 +174,10 @@ func preloadMulticastCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			return nil, errors.New("Invalid multicast package")
 		}
 		pkgTok := binary.LittleEndian.Uint64(box[:8])
-		v, ok := node.Objs().Get(runtime.KindMulticastPkg, pkgTok)
+		pkg, ok := node.Objs().Get[*mcPackage](runtime.KindMulticastPkg, pkgTok)
 		if !ok {
 			return nil, errors.New("multicast package not found")
 		}
-		pkg := v.(*mcPackage)
 		if ref < 0 {
 			return nil, fmt.Errorf("Invalid multicast package reference %d", ref)
 		}
@@ -215,11 +212,10 @@ func preloadMulticastCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 			return nil, errors.New("Invalid multicast package")
 		}
 		pkgTok := binary.LittleEndian.Uint64(box[:8])
-		v, ok := node.Objs().Delete(runtime.KindMulticastPkg, pkgTok)
+		pkg, ok := node.Objs().Take[*mcPackage](runtime.KindMulticastPkg, pkgTok)
 		if !ok {
 			return nil, errors.New("multicast package not found")
 		}
-		pkg := v.(*mcPackage)
 		return []moelua.Value{runtime.LightUDToken(pkg.dataTok), moelua.Int(int64(pkg.size))}, nil
 	}))
 

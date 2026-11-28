@@ -353,3 +353,64 @@ func (c *callbackService) Dispatch(a *Actor, m *Message) error {
 }
 func (c *callbackService) Signal(_ *Actor, _ int) {}
 func (c *callbackService) Close(_ *Actor)         {}
+
+func TestNodeExtGeneric(t *testing.T) {
+	n, err := NewNode(Config{Threads: 1, LogOutput: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+
+	type state struct{ id int }
+	if got, ok := n.Ext[*state]("missing"); ok || got != nil {
+		t.Fatalf("missing key: got (%v, %v), want (nil, false)", got, ok)
+	}
+
+	want := &state{id: 42}
+	n.SetExt("k", want)
+	if got, ok := n.Ext[*state]("k"); !ok || got != want {
+		t.Fatalf("matching type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if got, ok := n.Ext[string]("k"); ok || got != "" {
+		t.Fatalf("mismatched type: got (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := n.Ext[any]("k"); !ok || got != want {
+		t.Fatalf("any type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+
+	n.SetExt("nilval", nil)
+	if got, ok := n.Ext[*state]("nilval"); ok || got != nil {
+		t.Fatalf("nil value: got (%v, %v), want (nil, false)", got, ok)
+	}
+}
+
+func TestObjRegistryGeneric(t *testing.T) {
+	reg := NewObjRegistry()
+	type item struct{ id int }
+	want := &item{id: 7}
+	tok := reg.Put(KindSprotoObj, want)
+
+	if got, ok := reg.Get[*item](KindSprotoObj, tok); !ok || got != want {
+		t.Fatalf("Get matching type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if got, ok := reg.Get[string](KindSprotoObj, tok); ok || got != "" {
+		t.Fatalf("Get mismatched type: got (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := reg.Take[string](KindSprotoObj, tok); ok || got != "" {
+		t.Fatalf("Take mismatched type must not remove entry: got (%q, %v)", got, ok)
+	}
+	if got, ok := reg.Take[*item](KindSprotoObj, tok); !ok || got != want {
+		t.Fatalf("Take matching type: got (%v, %v), want (%v, true)", got, ok, want)
+	}
+	if _, ok := reg.Get[*item](KindSprotoObj, tok); ok {
+		t.Fatal("Get after Take succeeded, expected false")
+	}
+
+	tok2 := reg.Put(KindSprotoObj, want)
+	if !reg.Delete(KindSprotoObj, tok2) {
+		t.Fatal("Delete live token returned false")
+	}
+	if reg.Delete(KindSprotoObj, tok2) {
+		t.Fatal("Delete already-deleted token returned true")
+	}
+}

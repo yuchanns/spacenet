@@ -222,11 +222,10 @@ func preloadDatasheetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, er
 	var copyTable func(st *moelua.State, tbl *moelua.Table, p *dsProxy) error
 
 	getAndRetainDoc := func(docTok uint64) (*dsDoc, error) {
-		v, ok := node.Objs().Get(runtime.KindDatasheetDoc, docTok)
+		doc, ok := node.Objs().Get[*dsDoc](runtime.KindDatasheetDoc, docTok)
 		if !ok {
 			return nil, errors.New("invalid datasheet document pointer")
 		}
-		doc := v.(*dsDoc)
 		if !doc.retain() {
 			return nil, errors.New("invalid datasheet document pointer")
 		}

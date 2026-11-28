@@ -48,7 +48,7 @@ func initDebugNode(node *runtime.Node) (io.Closer, error) {
 }
 
 func nodeDebugState(node *runtime.Node) *debugNodeState {
-	if st, ok := node.Ext(extKeyDebugState).(*debugNodeState); ok && st != nil {
+	if st, ok := node.Ext[*debugNodeState](extKeyDebugState); ok && st != nil {
 		return st
 	}
 	return &debugNodeState{}
@@ -337,11 +337,10 @@ func preloadDebugChannel(s *moelua.State, _ []moelua.Value) ([]moelua.Value, err
 		if !ok || tok == 0 {
 			return nil, errors.New("Invalid channel pointer")
 		}
-		v, ok := node.Objs().Get(runtime.KindDebugChan, tok)
+		ch, ok := node.Objs().Get[*debugChan](runtime.KindDebugChan, tok)
 		if !ok {
 			return nil, errors.New("new channel failed")
 		}
-		ch := v.(*debugChan)
 		ch.mu.Lock()
 		if ch.ref != 1 {
 			ch.mu.Unlock()

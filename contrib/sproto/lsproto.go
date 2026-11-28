@@ -84,7 +84,7 @@ func New() *contrib.Contrib {
 }
 
 func getStore(n *runtime.Node) (*nodeStore, error) {
-	st, ok := n.Ext(extKey).(*nodeStore)
+	st, ok := n.Ext[*nodeStore](extKey)
 	if !ok || st == nil {
 		return nil, errors.New("sproto contrib not initialized on node")
 	}
@@ -194,11 +194,7 @@ func preloadSprotoCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error
 		if !ok || tok == 0 {
 			return nil, errors.New("Need a sproto object")
 		}
-		v, ok := node.Objs().Get(runtime.KindSprotoObj, tok)
-		if !ok {
-			return nil, errors.New("Need a sproto object")
-		}
-		sc, ok := v.(*Schema)
+		sc, ok := node.Objs().Get[*Schema](runtime.KindSprotoObj, tok)
 		if !ok {
 			return nil, errors.New("Need a sproto object")
 		}
@@ -222,11 +218,7 @@ func preloadSprotoCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error
 		if !ok || tok == 0 {
 			return nil, errors.New("Need a sproto_type object")
 		}
-		v, ok := node.Objs().Get(runtime.KindSprotoObj, tok)
-		if !ok {
-			return nil, errors.New("Need a sproto_type object")
-		}
-		sc, ok := v.(*Schema)
+		sc, ok := node.Objs().Get[*Schema](runtime.KindSprotoObj, tok)
 		if !ok {
 			return nil, errors.New("Need a sproto_type object")
 		}
@@ -318,11 +310,7 @@ func preloadSprotoCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error
 			}
 			return []moelua.Value{st.String("")}, nil
 		}
-		v, ok := node.Objs().Get(runtime.KindSprotoObj, tok)
-		if !ok {
-			return nil, errors.New("invalid sproto_type")
-		}
-		tp, ok := v.(*Type)
+		tp, ok := node.Objs().Get[*Type](runtime.KindSprotoObj, tok)
 		if !ok {
 			return nil, errors.New("invalid sproto_type")
 		}
@@ -344,11 +332,7 @@ func preloadSprotoCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error
 		if !ok || tok == 0 {
 			return nil, nil
 		}
-		v, ok := node.Objs().Get(runtime.KindSprotoObj, tok)
-		if !ok {
-			return nil, errors.New("invalid sproto_type")
-		}
-		tp, ok := v.(*Type)
+		tp, ok := node.Objs().Get[*Type](runtime.KindSprotoObj, tok)
 		if !ok {
 			return nil, errors.New("invalid sproto_type")
 		}
@@ -407,11 +391,7 @@ func preloadSprotoCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error
 		if !ok || tok == 0 {
 			return nil, errors.New("Need a sproto_type object")
 		}
-		v, ok := node.Objs().Get(runtime.KindSprotoObj, tok)
-		if !ok {
-			return nil, errors.New("Need a sproto_type object")
-		}
-		tp, ok := v.(*Type)
+		tp, ok := node.Objs().Get[*Type](runtime.KindSprotoObj, tok)
 		if !ok {
 			return nil, errors.New("Need a sproto_type object")
 		}

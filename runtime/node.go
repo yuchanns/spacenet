@@ -375,12 +375,17 @@ func (n *Node) MemoryInfo() map[uint32]int64 {
 	return out
 }
 
-// Ext retrieves per-Node plugin state by key.
-func (n *Node) Ext(key string) any {
+// Ext retrieves per-Node plugin state by key and asserts it to T.
+func (n *Node) Ext[T any](key string) (T, bool) {
 	n.extMu.RLock()
-	v := n.ext[key]
+	raw, exists := n.ext[key]
 	n.extMu.RUnlock()
-	return v
+	if !exists {
+		var zero T
+		return zero, false
+	}
+	v, ok := raw.(T)
+	return v, ok
 }
 
 // SetExt stores per-Node plugin state by key.
