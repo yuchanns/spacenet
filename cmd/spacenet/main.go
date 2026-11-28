@@ -78,12 +78,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		spacenet.WithContrib(all.Contribs()...),
 	}
 	if fs.NArg() == 1 {
-		cfgOpt, err := spacenet.LoadConfigFile(fs.Arg(0))
+		cfgOpts, err := loadConfigFile(fs.Arg(0))
 		if err != nil {
 			fmt.Fprintf(stderr, "spacenet: %v\n", err)
 			return 1
 		}
-		opts = append(opts, cfgOpt)
+		opts = append(opts, cfgOpts...)
 	}
 	if *threads > 0 {
 		opts = append(opts, spacenet.WithThreads(*threads))

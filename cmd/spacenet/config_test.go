@@ -1,4 +1,4 @@
-package spacenet_test
+package main
 
 import (
 	"os"
@@ -35,9 +35,9 @@ ratio = 1.5
 		t.Fatal(err)
 	}
 
-	env, err := spacenet.ParseConfigFile(mainPath)
+	env, err := parseConfigFile(mainPath)
 	if err != nil {
-		t.Fatalf("ParseConfigFile failed: %v", err)
+		t.Fatalf("parseConfigFile failed: %v", err)
 	}
 	want := map[string]string{
 		"thread":  "4",
@@ -67,11 +67,11 @@ custom_key = "custom_val"
 		t.Fatal(err)
 	}
 
-	opt, err := spacenet.LoadConfigFile(cfgPath)
+	opts, err := loadConfigFile(cfgPath)
 	if err != nil {
-		t.Fatalf("LoadConfigFile failed: %v", err)
+		t.Fatalf("loadConfigFile failed: %v", err)
 	}
-	node, err := spacenet.New(opt)
+	node, err := spacenet.New(opts...)
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
