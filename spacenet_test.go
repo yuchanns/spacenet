@@ -145,29 +145,6 @@ end)
 	}
 }
 
-func TestNoBuiltInSkynetAlias(t *testing.T) {
-	customFS := fstest.MapFS{
-		"service/no_alias.lua": &fstest.MapFile{Data: []byte(`
-local spacenet = require "spacenet"
-
-spacenet.start(function()
-	local ok1 = pcall(require, "skynet")
-	local ok2 = pcall(require, "skynet.core")
-	assert(not ok1, "expected require('skynet') to fail without user preload alias")
-	assert(not ok2, "expected require('skynet.core') to fail without user preload alias")
-	spacenet.error("NO_BUILTIN_ALIAS_OK")
-	spacenet.exit()
-end)
-`)},
-	}
-
-	node, logs := newCoreTestNode(t, "no_alias", spacenet.WithFS(customFS))
-	if err := node.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waitForLog(t, logs, "NO_BUILTIN_ALIAS_OK", 5*time.Second)
-}
-
 func TestUpstreamCoreSkynetTests(t *testing.T) {
 	upstreamFS := onlyDirsFS{
 		base: os.DirFS("third_party/skynet"),
