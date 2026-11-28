@@ -3,6 +3,7 @@ package spacenet_test
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -12,6 +13,43 @@ import (
 
 	"github.com/yuchanns/spacenet"
 )
+
+const skynetAliasPreload = `
+local function alias(name)
+	if name == "skynet" or name:sub(1, 7) == "skynet." then
+		return "spacenet" .. name:sub(7)
+	end
+	return name
+end
+
+local orig_require = _G.require
+_G.require = function(name)
+	return orig_require(alias(name))
+end
+
+local sr = orig_require("spacenet.require")
+local orig_sr = sr.require
+sr.require = function(name)
+	return orig_sr(alias(name))
+end
+`
+
+type onlyDirsFS struct {
+	base fs.FS
+	dirs []string
+}
+
+func (f onlyDirsFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return f.base.Open(name)
+	}
+	for _, d := range f.dirs {
+		if name == d || strings.HasPrefix(name, d+"/") {
+			return f.base.Open(name)
+		}
+	}
+	return nil, fs.ErrNotExist
+}
 
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -49,9 +87,6 @@ func newCoreTestNode(t *testing.T, startSvc string, extra ...spacenet.Option) (*
 		spacenet.WithThreads(4),
 		spacenet.WithLogOutput(logs),
 		spacenet.WithStart(startSvc),
-		spacenet.WithFS(os.DirFS("third_party/skynet")),
-		spacenet.WithEnv("luaservice", "./service/?.lua;./test/?.lua;./examples/?.lua"),
-		spacenet.WithEnv("snax", "./test/?.lua;./examples/?.lua"),
 	}
 	opts = append(opts, extra...)
 	node, err := spacenet.New(opts...)
@@ -67,19 +102,19 @@ func newCoreTestNode(t *testing.T, startSvc string, extra ...spacenet.Option) (*
 func TestCoreBootstrapAndGoLuaRPC(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/go_rpc_main.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-require "skynet.manager"
+local spacenet = require "spacenet"
+require "spacenet.manager"
 
-skynet.start(function()
-	skynet.dispatch("lua", function(session, source, cmd, a, b)
+spacenet.start(function()
+	spacenet.dispatch("lua", function(session, source, cmd, a, b)
 		if cmd == "add" then
-			skynet.retpack(a + b, "ok")
+			spacenet.retpack(a + b, "ok")
 		elseif cmd == "ping" then
-			skynet.retpack("pong:" .. tostring(a))
+			spacenet.retpack("pong:" .. tostring(a))
 		end
 	end)
-	skynet.register(".calc")
-	skynet.error("GO_RPC_READY")
+	spacenet.register(".calc")
+	spacenet.error("GO_RPC_READY")
 end)
 `)},
 	}
@@ -110,7 +145,45 @@ end)
 	}
 }
 
+func TestNoBuiltInSkynetAlias(t *testing.T) {
+	customFS := fstest.MapFS{
+		"service/no_alias.lua": &fstest.MapFile{Data: []byte(`
+local spacenet = require "spacenet"
+
+spacenet.start(function()
+	local ok1 = pcall(require, "skynet")
+	local ok2 = pcall(require, "skynet.core")
+	assert(not ok1, "expected require('skynet') to fail without user preload alias")
+	assert(not ok2, "expected require('skynet.core') to fail without user preload alias")
+	spacenet.error("NO_BUILTIN_ALIAS_OK")
+	spacenet.exit()
+end)
+`)},
+	}
+
+	node, logs := newCoreTestNode(t, "no_alias", spacenet.WithFS(customFS))
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, logs, "NO_BUILTIN_ALIAS_OK", 5*time.Second)
+}
+
 func TestUpstreamCoreSkynetTests(t *testing.T) {
+	upstreamFS := onlyDirsFS{
+		base: os.DirFS("third_party/skynet"),
+		dirs: []string{"test", "examples"},
+	}
+	preloadFS := fstest.MapFS{
+		"skynet_alias.lua": &fstest.MapFile{Data: []byte(skynetAliasPreload)},
+	}
+	upstreamOpts := []spacenet.Option{
+		spacenet.WithFS(preloadFS),
+		spacenet.WithFS(upstreamFS),
+		spacenet.WithEnv("preload", "./skynet_alias.lua"),
+		spacenet.WithEnv("luaservice", "./service/?.lua;./test/?.lua;./examples/?.lua"),
+		spacenet.WithEnv("snax", "./test/?.lua;./examples/?.lua"),
+	}
+
 	cases := []struct {
 		name      string
 		start     string
@@ -195,7 +268,8 @@ func TestUpstreamCoreSkynetTests(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			node, logs := newCoreTestNode(t, tc.start, tc.extra...)
+			opts := append(append([]spacenet.Option{}, upstreamOpts...), tc.extra...)
+			node, logs := newCoreTestNode(t, tc.start, opts...)
 			if err := node.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -230,36 +304,36 @@ func TestUpstreamCoreSkynetTests(t *testing.T) {
 func TestEndlessLoopDetectionAndSignal0(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/loop_driver.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-require "skynet.manager"
+local spacenet = require "spacenet"
+require "spacenet.manager"
 
 local mode = ...
 if mode == "worker" then
-	skynet.start(function()
-		skynet.dispatch("lua", function()
+	spacenet.start(function()
+		spacenet.dispatch("lua", function()
 			local ok, err = pcall(function()
 				local i = 0
 				while true do
 					i = i + 1
 				end
 			end)
-			skynet.error("LOOP_INTERRUPTED", ok, tostring(err))
-			skynet.retpack(ok, tostring(err))
+			spacenet.error("LOOP_INTERRUPTED", ok, tostring(err))
+			spacenet.retpack(ok, tostring(err))
 		end)
 	end)
 else
-	skynet.start(function()
-		local w = skynet.newservice("loop_driver", "worker")
-		skynet.fork(function()
-			skynet.call(w, "lua")
-			skynet.error("DRIVER_DONE")
-			skynet.exit()
+	spacenet.start(function()
+		local w = spacenet.newservice("loop_driver", "worker")
+		spacenet.fork(function()
+			spacenet.call(w, "lua")
+			spacenet.error("DRIVER_DONE")
+			spacenet.exit()
 		end)
-		skynet.sleep(30)
-		skynet.send(".launcher", "lua", "LIST")
+		spacenet.sleep(30)
+		spacenet.send(".launcher", "lua", "LIST")
 		-- Send signal 0 to interrupt endless loop
-		local c = require "skynet.core"
-		c.command("SIGNAL", skynet.address(w) .. " 0")
+		local c = require "spacenet.core"
+		c.command("SIGNAL", spacenet.address(w) .. " 0")
 	end)
 end
 `)},
@@ -280,17 +354,17 @@ end
 func TestCodeCacheClearAndMode(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/cache_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local cc = require "skynet.codecache"
+local spacenet = require "spacenet"
+local cc = require "spacenet.codecache"
 
-skynet.start(function()
+spacenet.start(function()
 	assert(cc.mode() == "ON")
 	assert(cc.mode("EXIST") == "EXIST")
 	assert(cc.mode("OFF") == "OFF")
 	assert(cc.mode("ON") == "ON")
 	cc.clear()
-	skynet.error("CODECACHE_OK")
-	skynet.exit()
+	spacenet.error("CODECACHE_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -318,9 +392,9 @@ func TestLoadFileWithEnvAndMetaPairsUnderGCPressure(t *testing.T) {
 	customFS := fstest.MapFS{
 		"lualib/gc_chunk.lua": &fstest.MapFile{Data: []byte(chunk.String())},
 		"service/gc_pin_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 
-skynet.start(function()
+spacenet.start(function()
 	for i = 1, 40 do
 		local env = setmetatable({ tag = i }, { __index = _G })
 		local m = assert(loadfile("lualib/gc_chunk.lua", "t", env))()
@@ -338,13 +412,13 @@ skynet.start(function()
 			end, {}, nil
 		end,
 	})
-	local msg, sz = skynet.pack(proxy)
-	local unpacked = skynet.unpack(msg, sz)
+	local msg, sz = spacenet.pack(proxy)
+	local unpacked = spacenet.unpack(msg, sz)
 	assert(unpacked["k_1"].v == string.rep("z", 128))
 	assert(unpacked["k_200"].v == string.rep("z", 128))
 
-	skynet.error("GC_PIN_OK")
-	skynet.exit()
+	spacenet.error("GC_PIN_OK")
+	spacenet.exit()
 end)
 `)},
 	}

@@ -27,11 +27,11 @@ const (
 	dhGen   uint64 = 5
 )
 
-// New returns the crypt contrib (providing skynet.crypt, client.crypt, md5.core, md5).
+// New returns the crypt contrib (providing spacenet.crypt, client.crypt, md5.core, md5).
 func New() *contrib.Contrib {
 	return contrib.New("crypt",
 		contrib.WithFS(subFS),
-		contrib.WithPreload("skynet.crypt", preloadCrypt),
+		contrib.WithPreload("spacenet.crypt", preloadCrypt),
 		contrib.WithPreload("client.crypt", preloadCrypt),
 		contrib.WithPreload("md5.core", preloadMD5Core),
 	)

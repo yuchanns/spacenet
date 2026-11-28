@@ -82,12 +82,12 @@ func TestTLSBIOHandshakeAndRoundTrip(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/tls_bio_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local ltls = require "ltls.c"
 
-skynet.start(function()
-	local cert = skynet.getenv("test_cert")
-	local key = skynet.getenv("test_key")
+spacenet.start(function()
+	local cert = spacenet.getenv("test_cert")
+	local key = spacenet.getenv("test_key")
 
 	local sctx = ltls.newctx()
 	sctx:set_cert(cert, key)
@@ -135,8 +135,8 @@ skynet.start(function()
 
 	client:close()
 	server:close()
-	skynet.error("TLS_BIO_OK")
-	skynet.exit()
+	spacenet.error("TLS_BIO_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -176,12 +176,12 @@ func TestPerNodeIsolationAndPreHandshakeGuards(t *testing.T) {
 	// must remain initialized and functional, and read/write before handshake must fail.
 	fsA := fstest.MapFS{
 		"service/destructor.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local init = require "ltls.init.c"
-skynet.start(function()
+spacenet.start(function()
 	init.destructor()
-	skynet.error("NODE_A_DESTRUCTED")
-	skynet.exit()
+	spacenet.error("NODE_A_DESTRUCTED")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -210,9 +210,9 @@ end)
 
 	fsB := fstest.MapFS{
 		"service/check_b.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local ltls = require "ltls.c"
-skynet.start(function()
+spacenet.start(function()
 	local ctx = ltls.newctx()
 	local cli = ltls.newtls("client", ctx, "localhost")
 	local okR = pcall(function() cli:read("") end)
@@ -222,8 +222,8 @@ skynet.start(function()
 	-- Start handshake without closing explicitly; Node.Close() must clean it up.
 	local hs = cli:handshake()
 	assert(hs and #hs > 0)
-	skynet.error("NODE_B_OK")
-	skynet.exit()
+	spacenet.error("NODE_B_OK")
+	spacenet.exit()
 end)
 `)},
 	}

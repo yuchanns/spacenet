@@ -1,6 +1,6 @@
 # contrib/debug
 
-Debug console, memory inspection, and remote debugging contrib module for `spacenet`, providing `skynet.memory`, `skynet.debugchannel`, `skynet.inject`, `skynet.injectcode`, `skynet.remotedebug`, `debug_console`, `debug_agent`, `console`, `cmemory`, and `dbg`.
+Debug console, memory inspection, and remote debugging contrib module for `spacenet`, providing `spacenet.memory`, `spacenet.debugchannel`, `spacenet.inject`, `spacenet.injectcode`, `spacenet.remotedebug`, `debug_console`, `debug_agent`, `console`, `cmemory`, and `dbg`.
 
 Declares `contrib/http` as a dependency.
 

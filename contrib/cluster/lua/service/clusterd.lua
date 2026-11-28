@@ -1,6 +1,6 @@
-local skynet = require "skynet"
-require "skynet.manager"
-local cluster = require "skynet.cluster.core"
+local skynet = require "spacenet"
+require "spacenet.manager"
+local cluster = require "spacenet.cluster.core"
 
 local config_name = skynet.getenv "cluster"
 local node_address = {}

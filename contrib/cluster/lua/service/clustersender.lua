@@ -1,7 +1,7 @@
-local skynet = require "skynet"
-local sc = require "skynet.socketchannel"
-local socket = require "skynet.socket"
-local cluster = require "skynet.cluster.core"
+local skynet = require "spacenet"
+local sc = require "spacenet.socketchannel"
+local socket = require "spacenet.socket"
+local cluster = require "spacenet.cluster.core"
 
 local channel
 local session = 1

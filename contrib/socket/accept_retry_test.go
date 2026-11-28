@@ -86,8 +86,9 @@ func TestAcceptLoopRetriesRecoverableError(t *testing.T) {
 	defer c2.Close()
 	ln.connCh <- c2
 
-	e := mgr.allocEntry(kindListen, owner)
-	e.listener = ln
+	e := mgr.allocEntry(kindListen, owner, func(entry *sockEntry) {
+		entry.listener = ln
+	})
 	e.startAcceptLoop(mgr)
 
 	deadline := time.Now().Add(2 * time.Second)

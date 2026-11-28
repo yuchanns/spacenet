@@ -35,8 +35,8 @@ func New() *contrib.Contrib {
 		contrib.WithInit(initDebugNode),
 		contrib.WithFS(subFS),
 		contrib.WithPreloads(map[string]moelua.GoFunc{
-			"skynet.memory":       preloadMemory,
-			"skynet.debugchannel": preloadDebugChannel,
+			"spacenet.memory":       preloadMemory,
+			"spacenet.debugchannel": preloadDebugChannel,
 		}),
 	)
 }

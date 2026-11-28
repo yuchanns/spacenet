@@ -103,13 +103,13 @@ func TestRunConfigFileToCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	svcScript := `
-local skynet = require "skynet"
-require "skynet.manager"
-local crypt = require "skynet.crypt"
-skynet.start(function()
-	local greeting = skynet.getenv("greeting") or ""
-	skynet.error("CLI_HELLO:" .. greeting .. ":" .. crypt.base64encode("ok"))
-	skynet.abort()
+local spacenet = require "spacenet"
+require "spacenet.manager"
+local crypt = require "spacenet.crypt"
+spacenet.start(function()
+	local greeting = spacenet.getenv("greeting") or ""
+	spacenet.error("CLI_HELLO:" .. greeting .. ":" .. crypt.base64encode("ok"))
+	spacenet.abort()
 end)
 `
 	if err := os.WriteFile(filepath.Join(svcDir, "cli_hello.lua"), []byte(svcScript), 0o644); err != nil {
@@ -145,11 +145,11 @@ func TestRunGracefulCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	svcScript := `
-local skynet = require "skynet"
-skynet.start(function()
-	skynet.error("CLI_WAITING")
+local spacenet = require "spacenet"
+spacenet.start(function()
+	spacenet.error("CLI_WAITING")
 	while true do
-		skynet.sleep(100)
+		spacenet.sleep(100)
 	end
 end)
 `

@@ -43,12 +43,12 @@ func waitLog(t *testing.T, buf *syncBuf, substr string) {
 func TestSprotoEncodeDecodeRPCAndEmptyResponse(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/sp_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local sproto = require "sproto"
 local sprotoparser = require "sprotoparser"
 local sprotoloader = require "sprotoloader"
 
-skynet.start(function()
+spacenet.start(function()
 	local schema = sprotoparser.parse [[
 .package {
 	type 0 : integer
@@ -179,8 +179,8 @@ ping 2 {
 	local okProtoOverflow = pcall(sprotoparser.parse, "badproto 32768 { response nil }")
 	assert(not okProtoOverflow, "expected error for overflowing protocol tag 32768")
 
-	skynet.error("SPROTO_ALL_OK")
-	skynet.exit()
+	spacenet.error("SPROTO_ALL_OK")
+	spacenet.exit()
 end)
 `)},
 	}

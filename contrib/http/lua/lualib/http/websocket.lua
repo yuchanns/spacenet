@@ -1,8 +1,8 @@
 local internal = require "http.internal"
-local socket = require "skynet.socket"
-local crypt = require "skynet.crypt"
+local socket = require "spacenet.socket"
+local crypt = require "spacenet.crypt"
 local httpd = require "http.httpd"
-local skynet = require "skynet"
+local skynet = require "spacenet"
 local sockethelper = require "http.sockethelper"
 local socket_error = sockethelper.socket_error
 

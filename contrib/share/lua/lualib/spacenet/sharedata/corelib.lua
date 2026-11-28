@@ -1,4 +1,4 @@
-local core = require "skynet.sharedata.core"
+local core = require "spacenet.sharedata.core"
 local type = type
 local rawset = rawset
 

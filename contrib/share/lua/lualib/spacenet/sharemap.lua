@@ -1,4 +1,4 @@
-local stm = require "skynet.stm"
+local stm = require "spacenet.stm"
 local sprotoloader = require "sprotoloader"
 local sproto = require "sproto"
 local setmetatable = setmetatable

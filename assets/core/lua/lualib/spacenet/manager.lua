@@ -1,5 +1,5 @@
-local skynet = require "skynet"
-local c = require "skynet.core"
+local skynet = require "spacenet"
+local c = require "spacenet.core"
 
 local function number_address(name)
 	local t = type(name)
@@ -43,7 +43,7 @@ local function globalname(name, handle)
 	assert(#name < 16)	-- GLOBALNAME_LENGTH is 16, defined in skynet_harbor.h
 	assert(tonumber(name) == nil)	-- global name can't be number
 
-	local harbor = require "skynet.harbor"
+	local harbor = require "spacenet.harbor"
 
 	harbor.globalname(name, handle)
 

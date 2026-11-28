@@ -1,5 +1,5 @@
-local socket = require "skynet.socket"
-local skynet = require "skynet"
+local socket = require "spacenet.socket"
+local skynet = require "spacenet"
 
 local coroutine = coroutine
 local error = error

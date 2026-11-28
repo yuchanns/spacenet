@@ -45,6 +45,6 @@ if LUA_PRELOAD then
 	LUA_PRELOAD = nil
 end
 
-_G.require = (require "skynet.require").require
+_G.require = (require "spacenet.require").require
 
 main(select(2, table.unpack(args)))

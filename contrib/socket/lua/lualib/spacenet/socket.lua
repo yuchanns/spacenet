@@ -1,6 +1,6 @@
-local driver = require "skynet.socketdriver"
-local skynet = require "skynet"
-local skynet_core = require "skynet.core"
+local driver = require "spacenet.socketdriver"
+local skynet = require "spacenet"
+local skynet_core = require "spacenet.core"
 local assert = assert
 
 local BUFFER_LIMIT = 128 * 1024

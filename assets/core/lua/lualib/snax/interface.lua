@@ -1,4 +1,4 @@
-local skynet = require "skynet"
+local skynet = require "spacenet"
 
 local function dft_loader(path, name, G)
 	local errlist = {}

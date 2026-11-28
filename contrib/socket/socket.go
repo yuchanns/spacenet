@@ -61,8 +61,8 @@ func New() *contrib.Contrib {
 			return mgr, nil
 		}),
 		contrib.WithFS(subFS),
-		contrib.WithPreload("skynet.socketdriver", preloadSocketDriver),
-		contrib.WithPreload("skynet.netpack", preloadNetpack),
+		contrib.WithPreload("spacenet.socketdriver", preloadSocketDriver),
+		contrib.WithPreload("spacenet.netpack", preloadNetpack),
 	)
 }
 
@@ -154,7 +154,7 @@ func newManager(n *runtime.Node) *manager {
 	}
 }
 
-func (m *manager) allocEntry(kind sockKind, owner uint32) *sockEntry {
+func (m *manager) allocEntry(kind sockKind, owner uint32, initFn func(*sockEntry)) *sockEntry {
 	id := int(m.nextID.Add(1))
 	e := &sockEntry{
 		id:     id,
@@ -163,9 +163,18 @@ func (m *manager) allocEntry(kind sockKind, owner uint32) *sockEntry {
 		stopCh: make(chan struct{}),
 	}
 	e.pauseCond = sync.NewCond(&e.mu)
+	if initFn != nil {
+		initFn(e)
+	}
 	m.mu.Lock()
-	m.sockets[id] = e
+	closed := m.closed.Load()
+	if !closed {
+		m.sockets[id] = e
+	}
 	m.mu.Unlock()
+	if closed {
+		e.forceClose(m, false)
+	}
 	return e
 }
 
@@ -183,10 +192,11 @@ func (m *manager) remove(id int) {
 }
 
 func (m *manager) Close() error {
+	m.mu.Lock()
 	if !m.closed.CompareAndSwap(false, true) {
+		m.mu.Unlock()
 		return nil
 	}
-	m.mu.Lock()
 	all := make([]*sockEntry, 0, len(m.sockets))
 	for _, e := range m.sockets {
 		all = append(all, e)
@@ -599,16 +609,18 @@ func (e *sockEntry) startAcceptLoop(m *manager) {
 			e.statRead.Add(1)
 			e.statRTime.Store(m.node.Timer().Now())
 
-			child := m.allocEntry(kindTCP, owner)
-			child.conn = conn
-			child.peerAddr = conn.RemoteAddr().String()
-			child.paused = true // 0 reader goroutines until driver.start(newid)!
+			peerAddr := conn.RemoteAddr().String()
+			child := m.allocEntry(kindTCP, owner, func(c *sockEntry) {
+				c.conn = conn
+				c.peerAddr = peerAddr
+				c.paused = true // 0 reader goroutines until driver.start(newid)!
+			})
 
 			if !m.emit(owner, &SocketEvent{
 				Type: SocketTypeAccept,
 				ID:   e.id,
 				UD:   child.id,
-				Text: child.peerAddr,
+				Text: peerAddr,
 			}) {
 				child.forceClose(m, false)
 				e.forceClose(m, false)
@@ -927,9 +939,10 @@ func (m *manager) lListen(s *moelua.State, args []moelua.Value) ([]moelua.Value,
 	actualIP := actualAddr.IP.String()
 	actualPort := actualAddr.Port
 
-	e := m.allocEntry(kindListen, actor.Handle())
-	e.listener = ln
-	e.localAddr = actualIP
+	e := m.allocEntry(kindListen, actor.Handle(), func(entry *sockEntry) {
+		entry.listener = ln
+		entry.localAddr = actualIP
+	})
 
 	// CRITICAL Skynet contract: emit CONNECT with actual IP & port immediately before driver.start!
 	m.emit(actor.Handle(), &SocketEvent{
@@ -953,7 +966,7 @@ func (m *manager) lConnect(s *moelua.State, args []moelua.Value) ([]moelua.Value
 	if port == 0 {
 		return nil, errors.New("Invalid port")
 	}
-	e := m.allocEntry(kindTCP, actor.Handle())
+	e := m.allocEntry(kindTCP, actor.Handle(), nil)
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	owner := actor.Handle()
 
@@ -963,6 +976,7 @@ func (m *manager) lConnect(s *moelua.State, args []moelua.Value) ([]moelua.Value
 			e.failTransport(m, derr)
 			return
 		}
+		peerAddr := conn.RemoteAddr().String()
 		e.mu.Lock()
 		if e.closed || e.closing || e.errored {
 			e.mu.Unlock()
@@ -970,14 +984,14 @@ func (m *manager) lConnect(s *moelua.State, args []moelua.Value) ([]moelua.Value
 			return
 		}
 		e.conn = conn
-		e.peerAddr = conn.RemoteAddr().String()
+		e.peerAddr = peerAddr
 		e.started = true
 		e.mu.Unlock()
 
 		if !m.emit(owner, &SocketEvent{
 			Type: SocketTypeConnect,
 			ID:   e.id,
-			Text: e.peerAddr,
+			Text: peerAddr,
 		}) {
 			e.forceClose(m, false)
 			return
@@ -1181,9 +1195,10 @@ func (m *manager) lBind(s *moelua.State, args []moelua.Value) ([]moelua.Value, e
 	}
 
 	pollable := stdin.SetReadDeadline(time.Time{}) == nil
-	e := m.allocEntry(kindBind, actor.Handle())
-	e.bindFile = stdin
-	e.bindPollable = pollable
+	e := m.allocEntry(kindBind, actor.Handle(), func(entry *sockEntry) {
+		entry.bindFile = stdin
+		entry.bindPollable = pollable
+	})
 	owner := actor.Handle()
 
 	if !m.emit(owner, &SocketEvent{
@@ -1395,9 +1410,10 @@ func (m *manager) lUDP(s *moelua.State, args []moelua.Value) ([]moelua.Value, er
 	if err != nil {
 		return nil, fmt.Errorf("udp init failed: %w", err)
 	}
-	e := m.allocEntry(kindUDP, actor.Handle())
-	e.pktConn = pc
-	e.localAddr = pc.LocalAddr().String()
+	e := m.allocEntry(kindUDP, actor.Handle(), func(entry *sockEntry) {
+		entry.pktConn = pc
+		entry.localAddr = pc.LocalAddr().String()
+	})
 	e.startUDPReader(m)
 	return []moelua.Value{moelua.Int(int64(e.id))}, nil
 }
@@ -1453,11 +1469,12 @@ func (m *manager) lUDPDial(s *moelua.State, args []moelua.Value) ([]moelua.Value
 	if err != nil {
 		return nil, fmt.Errorf("udp dial host failed: %w", err)
 	}
-	e := m.allocEntry(kindUDP, actor.Handle())
-	e.pktConn = pc
-	e.udpPeer = raddr
-	e.localAddr = pc.LocalAddr().String()
-	e.peerAddr = raddr.String()
+	e := m.allocEntry(kindUDP, actor.Handle(), func(entry *sockEntry) {
+		entry.pktConn = pc
+		entry.udpPeer = raddr
+		entry.localAddr = pc.LocalAddr().String()
+		entry.peerAddr = raddr.String()
+	})
 	e.startUDPReader(m)
 	return []moelua.Value{moelua.Int(int64(e.id))}, nil
 }
@@ -1475,9 +1492,10 @@ func (m *manager) lUDPListen(s *moelua.State, args []moelua.Value) ([]moelua.Val
 	if err != nil {
 		return nil, fmt.Errorf("udp listen host failed: %w", err)
 	}
-	e := m.allocEntry(kindUDP, actor.Handle())
-	e.pktConn = pc
-	e.localAddr = pc.LocalAddr().String()
+	e := m.allocEntry(kindUDP, actor.Handle(), func(entry *sockEntry) {
+		entry.pktConn = pc
+		entry.localAddr = pc.LocalAddr().String()
+	})
 	e.startUDPReader(m)
 	return []moelua.Value{moelua.Int(int64(e.id))}, nil
 }

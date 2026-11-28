@@ -20,10 +20,11 @@ import (
 func main() {
 	services := fstest.MapFS{
 		"service/hello.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-skynet.start(function()
-	skynet.error("hello from spacenet")
-	skynet.exit()
+local spacenet = require "spacenet"
+require "spacenet.manager"
+spacenet.start(function()
+	spacenet.error("hello from spacenet")
+	spacenet.abort()
 end)
 `)},
 	}

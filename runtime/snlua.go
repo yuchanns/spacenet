@@ -20,23 +20,23 @@ const (
 	ansiNormal            = "\x1B[0m"
 )
 
-// ActorFromState retrieves the *Actor bound to a MoeLua State via LUA_REGISTRYINDEX["skynet_context"].
+// ActorFromState retrieves the *Actor bound to a MoeLua State via LUA_REGISTRYINDEX["spacenet_context"].
 func ActorFromState(s *moelua.State) (*Actor, error) {
 	reg := s.Registry()
 	if reg == nil {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
-	v := reg.GetString("skynet_context")
+	v := reg.GetString("spacenet_context")
 	if !v.IsUserdata() {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
 	raw := s.Raw()
 	if raw == nil {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
 	a, ok := raw.UserdataData(raw.AsUserdata(v)).(*Actor)
 	if !ok || a == nil {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
 	return a, nil
 }
@@ -72,9 +72,9 @@ func (n *Node) buildLuaTemplate(pluginPreloads map[string]moelua.GoFunc) (*moelu
 	opts := []moelua.Option{
 		moelua.WithNoEnv(),
 		moelua.WithLibs(moelua.LibAll),
-		moelua.WithPreload("skynet.core", n.preloadSkynetCore),
-		moelua.WithPreload("skynet.codecache", n.preloadCodeCache),
-		moelua.WithPreload("skynet.profile", n.preloadProfile),
+		moelua.WithPreload("spacenet.core", n.preloadCore),
+		moelua.WithPreload("spacenet.codecache", n.preloadCodeCache),
+		moelua.WithPreload("spacenet.profile", n.preloadProfile),
 	}
 	for name, loader := range pluginPreloads {
 		opts = append(opts, moelua.WithPreload(name, loader))
@@ -344,11 +344,11 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 
 	// Bind *Actor and *snluaService in registry (never overwrite raw.Host!).
 	reg := s.Registry()
-	_ = reg.SetString("skynet_context", s.NewUserdata(actor))
+	_ = reg.SetString("spacenet_context", s.NewUserdata(actor))
 	_ = reg.SetString("spacenet_snlua", s.NewUserdata(l))
 
 	// Pin traceback helper once.
-	tbFn := s.NewFunc("skynet.traceback", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
+	tbFn := s.NewFunc("spacenet.traceback", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 		msg := "(no error message)"
 		if len(args) > 0 && !args[0].IsNil() {
 			if str, ok := st.ToString(args[0]); ok {
@@ -361,8 +361,8 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 	})
 	l.tbFn = s.Pin(tbFn)
 
-	// Open skynet.profile and replace coroutine.resume / coroutine.wrap (matching service_snlua.c:448-458).
-	profMod, err := s.RequireLib("skynet.profile", n.preloadProfile, false)
+	// Open spacenet.profile and replace coroutine.resume / coroutine.wrap (matching service_snlua.c:448-458).
+	profMod, err := s.RequireLib("spacenet.profile", n.preloadProfile, false)
 	if err != nil {
 		s.Close()
 		return err
@@ -374,8 +374,8 @@ func (l *snluaService) Init(actor *Actor, param string) error {
 		_ = coroTbl.SetString("wrap", profTbl.GetString("wrap"))
 	}
 
-	// Register skynet.codecache in package.loaded.
-	if _, err := s.RequireLib("skynet.codecache", n.preloadCodeCache, false); err != nil {
+	// Register spacenet.codecache in package.loaded.
+	if _, err := s.RequireLib("spacenet.codecache", n.preloadCodeCache, false); err != nil {
 		s.Close()
 		return err
 	}
@@ -589,21 +589,21 @@ func formatProtectedError(s *moelua.State, errVal moelua.Value, uerr error) stri
 func snluaFromState(s *moelua.State) (*snluaService, error) {
 	reg := s.Registry()
 	if reg == nil {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
 	v := reg.GetString("spacenet_snlua")
 	if !v.IsUserdata() {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
 	raw := s.Raw()
 	l, ok := raw.UserdataData(raw.AsUserdata(v)).(*snluaService)
 	if !ok || l == nil {
-		return nil, errors.New("Init skynet context first")
+		return nil, errors.New("Init spacenet context first")
 	}
 	return l, nil
 }
 
-// ---------- skynet.codecache ----------
+// ---------- spacenet.codecache ----------
 
 func (n *Node) preloadCodeCache(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 	tbl := s.NewTable(0, 4)
@@ -829,9 +829,9 @@ func (n *Node) preloadProfile(s *moelua.State, _ []moelua.Value) ([]moelua.Value
 	return []moelua.Value{mod.Value()}, nil
 }
 
-// ---------- skynet.core ----------
+// ---------- spacenet.core ----------
 
-func (n *Node) preloadSkynetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
+func (n *Node) preloadCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 	actor, err := ActorFromState(s)
 	if err != nil {
 		return nil, err
@@ -842,7 +842,7 @@ func (n *Node) preloadSkynetCore(s *moelua.State, _ []moelua.Value) ([]moelua.Va
 	}
 	tbl := s.NewTable(0, 18)
 	setFn := func(name string, fn moelua.GoFunc) {
-		_ = tbl.SetString(name, s.NewFunc("skynet.core."+name, fn))
+		_ = tbl.SetString(name, s.NewFunc("spacenet.core."+name, fn))
 	}
 	setFn("send", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 		return n.sendLuaMessage(st, actor, args, 0, 1)
@@ -1287,7 +1287,7 @@ func (n *Node) coreUnpackN(s *moelua.State, actor *Actor, args []moelua.Value) (
 
 func (n *Node) coreTrash(s *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
 	if len(args) == 0 {
-		return nil, errors.New("skynet.trash invalid param no value")
+		return nil, errors.New("spacenet.trash invalid param no value")
 	}
 	switch {
 	case args[0].IsString():
@@ -1305,7 +1305,7 @@ func (n *Node) coreTrash(s *moelua.State, args []moelua.Value) ([]moelua.Value, 
 		}
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("skynet.trash invalid param %s", args[0].TypeName())
+		return nil, fmt.Errorf("spacenet.trash invalid param %s", args[0].TypeName())
 	}
 }
 

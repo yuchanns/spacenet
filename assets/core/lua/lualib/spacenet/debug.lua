@@ -82,7 +82,7 @@ local function init(skynet, export)
 		end
 
 		function dbgcmd.RUN(source, filename, ...)
-			local inject = require "skynet.inject"
+			local inject = require "spacenet.inject"
 			local args = table.pack(...)
 			local ok, output = inject(skynet, source, filename, args, export.dispatch, skynet.register_protocol)
 			collectgarbage "collect"
@@ -94,7 +94,7 @@ local function init(skynet, export)
 		end
 
 		function dbgcmd.REMOTEDEBUG(...)
-			local remotedebug = require "skynet.remotedebug"
+			local remotedebug = require "spacenet.remotedebug"
 			remotedebug.start(export, ...)
 		end
 

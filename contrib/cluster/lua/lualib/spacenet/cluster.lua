@@ -1,4 +1,4 @@
-local skynet = require "skynet"
+local skynet = require "spacenet"
 
 local clusterd
 local cluster = {}
@@ -94,7 +94,7 @@ function cluster.proxy(node, name)
 end
 
 function cluster.snax(node, name, address)
-	local snax = require "skynet.snax"
+	local snax = require "spacenet.snax"
 	if not address then
 		address = cluster.call(node, ".service", "QUERY", "snaxd" , name)
 	end

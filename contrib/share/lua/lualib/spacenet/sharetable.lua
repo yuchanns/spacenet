@@ -1,12 +1,12 @@
-local skynet = require "skynet"
-local service = require "skynet.service"
-local core = require "skynet.sharetable.core"
+local skynet = require "spacenet"
+local service = require "spacenet.service"
+local core = require "spacenet.sharetable.core"
 local is_sharedtable = core.is_sharedtable
 local stackvalues = core.stackvalues
 
 local function sharetable_service()
-	local skynet = require "skynet"
-	local core = require "skynet.sharetable.core"
+	local skynet = require "spacenet"
+	local core = require "spacenet.sharetable.core"
 
 	local matrix = {}	-- all the matrix
 	local files = {}	-- filename : matrix

@@ -1,6 +1,6 @@
 # contrib/socket
 
-TCP/UDP networking contrib module for `spacenet`, providing `skynet.socketdriver`, `skynet.netpack`, `skynet.socket`, `skynet.socketchannel`, `skynet.dns`, `snax.gateserver`, `snax.msgserver`, `snax.loginserver`, and the `gate` service.
+TCP/UDP networking contrib module for `spacenet`, providing `spacenet.socketdriver`, `spacenet.netpack`, `spacenet.socket`, `spacenet.socketchannel`, `spacenet.dns`, `snax.gateserver`, `snax.msgserver`, `snax.loginserver`, and the `gate` service.
 
 ## Usage
 

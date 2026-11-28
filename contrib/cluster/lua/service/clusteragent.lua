@@ -1,6 +1,6 @@
-local skynet = require "skynet"
-local socket = require "skynet.socket"
-local cluster = require "skynet.cluster.core"
+local skynet = require "spacenet"
+local socket = require "spacenet.socket"
+local cluster = require "spacenet.cluster.core"
 local ignoreret = skynet.ignoreret
 
 local clusterd, gate, fd = ...

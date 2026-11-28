@@ -1,7 +1,7 @@
-local skynet = require "skynet"
-require "skynet.manager"
-local socket = require "skynet.socket"
-local crypt = require "skynet.crypt"
+local skynet = require "spacenet"
+require "spacenet.manager"
+local socket = require "spacenet.socket"
+local crypt = require "spacenet.crypt"
 local table = table
 local string = string
 local assert = assert

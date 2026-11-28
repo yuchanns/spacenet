@@ -1,6 +1,6 @@
-local skynet = require "skynet"
-local service = require "skynet.service"
-local core = require "skynet.datasheet.core"
+local skynet = require "spacenet"
+local service = require "spacenet.service"
+local core = require "spacenet.datasheet.core"
 
 local datasheet_svr
 

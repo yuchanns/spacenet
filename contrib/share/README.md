@@ -1,8 +1,8 @@
 # contrib/share
 
-Cross-actor data sharing and pub/sub contrib module for `spacenet`, providing `skynet.sharetable`, `skynet.datasheet`, `skynet.sharedata`, `skynet.sharemap`, `skynet.stm`, and `skynet.multicast`.
+Cross-actor data sharing and pub/sub contrib module for `spacenet`, providing `spacenet.sharetable`, `spacenet.datasheet`, `spacenet.sharedata`, `spacenet.sharemap`, `spacenet.stm`, and `spacenet.multicast`.
 
-Declares `contrib/sproto` as a dependency for `skynet.sharemap`.
+Declares `contrib/sproto` as a dependency for `spacenet.sharemap`.
 
 ## Usage
 

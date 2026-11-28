@@ -1,7 +1,7 @@
-local skynet = require "skynet"
+local skynet = require "spacenet"
 local socket = require "http.sockethelper"
 local internal = require "http.internal"
-local dns = require "skynet.dns"
+local dns = require "spacenet.dns"
 
 local string = string
 local table = table
