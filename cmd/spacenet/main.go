@@ -46,7 +46,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		threads     = fs.Int("threads", 0, "number of actor worker goroutines (0 = NumCPU)")
 		startSvc    = fs.String("start", "", "override start Lua service launched by bootstrap")
 		baseDir     = fs.String("basedir", "", "base directory for resolving relative Lua paths")
-		enableJIT   = fs.Bool("jit", false, "enable MoeLua native JIT tier on supported platforms")
+		enableJIT   = fs.Bool("jit", true, "enable MoeLua native JIT tier on supported platforms")
 		showVersion = fs.Bool("version", false, "print spacenet version and exit")
 	)
 	fs.Usage = func() {
