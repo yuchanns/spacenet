@@ -48,37 +48,37 @@ func waitLog(t *testing.T, buf *syncBuf, substr string) {
 func TestTCPEchoTransferPauseAndUDP(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/sock_suite.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
 local mode, arg1 = ...
 if mode == "echo_agent" then
 	local fd = tonumber(arg1)
-	skynet.start(function()
+	spacenet.start(function()
 		socket.start(fd)
 		socket.write(fd, "WELCOME\n")
 		while true do
 			local line = socket.readline(fd, "\n")
 			if not line then
 				socket.close(fd)
-				skynet.exit()
+				spacenet.exit()
 				return
 			end
 			socket.write(fd, "ECHO:" .. line .. "\n")
 			if line == "BYE" then
 				socket.close(fd)
-				skynet.exit()
+				spacenet.exit()
 				return
 			end
 		end
 	end)
 else
-	skynet.start(function()
+	spacenet.start(function()
 		-- 1. TCP listen on ephemeral port 0 + transfer accepted fd to agent service
 		local lid, ip, port = socket.listen("127.0.0.1", 0)
 		assert(port > 0, "ephemeral port must be > 0")
 		socket.start(lid, function(id, addr)
-			skynet.newservice("sock_suite", "echo_agent", id)
+			spacenet.newservice("sock_suite", "echo_agent", id)
 		end)
 
 		local cfd = assert(socket.open("127.0.0.1", port))
@@ -119,19 +119,19 @@ else
 			assert(str == "PONG:ping")
 			got = got + 1
 			if got == 3 then
-				skynet.wakeup(done)
+				spacenet.wakeup(done)
 			end
 		end)
 		socket.udp_connect(cli, "127.0.0.1", 18765)
 		for i = 1, 3 do
 			socket.write(cli, "ping")
 		end
-		skynet.wait(done)
+		spacenet.wait(done)
 		socket.close(cli)
 		socket.close(srv2)
 
-		skynet.error("SOCKET_SUITE_OK")
-		skynet.exit()
+		spacenet.error("SOCKET_SUITE_OK")
+		spacenet.exit()
 	end)
 end
 `)},
@@ -193,18 +193,18 @@ func TestDNSResolverWithMockUDPServer(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/dns_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local dns = require "skynet.dns"
+local spacenet = require "spacenet"
+local dns = require "spacenet.dns"
 
-skynet.start(function()
-	local port = tonumber(skynet.getenv("mock_dns_port"))
+spacenet.start(function()
+	local port = tonumber(spacenet.getenv("mock_dns_port"))
 	dns.DEFAULT_HOSTS = nil
 	dns.server("127.0.0.1", port)
 	local ip, ips = dns.resolve("spacenet.example")
 	assert(ip == "127.0.0.42", "unexpected ip: " .. tostring(ip))
 	assert(ips[1] == "127.0.0.42")
-	skynet.error("DNS_OK")
-	skynet.exit()
+	spacenet.error("DNS_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -215,7 +215,6 @@ end)
 		spacenet.WithLogOutput(logs),
 		spacenet.WithContrib(socket.New()),
 		spacenet.WithFS(customFS),
-		spacenet.WithFS(os.DirFS("../../third_party/skynet")),
 		spacenet.WithEnv("mock_dns_port", stringInt(dnsPort)),
 		spacenet.WithStart("dns_test"),
 	)
@@ -250,26 +249,26 @@ func itoa(n int) string {
 func TestNetpackAndGateServer(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/gate_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
-local netpack = require "skynet.netpack"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
+local netpack = require "spacenet.netpack"
 
-skynet.start(function()
+spacenet.start(function()
 	local msg, sz = netpack.pack("hello-frame")
 	local raw = netpack.tostring(msg, sz)
 	assert(#raw == 2 + #"hello-frame")
 	assert(raw:sub(3) == "hello-frame")
 
-	-- Launch Skynet's embedded gate service on port 18888 via gateserver.lua
-	local gate = skynet.newservice("gate")
-	skynet.call(gate, "lua", "open", {
+	-- Launch embedded gate service on port 18888 via gateserver.lua
+	local gate = spacenet.newservice("gate")
+	spacenet.call(gate, "lua", "open", {
 		address = "127.0.0.1",
 		port = 18888,
 		maxclient = 64,
 		nodelay = true,
 	})
-	skynet.error("GATE_OPEN_OK")
-	skynet.exit()
+	spacenet.error("GATE_OPEN_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -306,7 +305,7 @@ func TestGateClientResetReclaimsSlots(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/reset_gate.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local gateserver = require "snax.gateserver"
 
 local handler = {}
@@ -314,33 +313,33 @@ local opens, closes = 0, 0
 function handler.connect(fd, addr)
 	opens = opens + 1
 	gateserver.openclient(fd)
-	skynet.error("GATE_CONN_" .. opens)
+	spacenet.error("GATE_CONN_" .. opens)
 end
 function handler.disconnect(fd)
 	closes = closes + 1
-	skynet.error("GATE_DISC_" .. closes)
+	spacenet.error("GATE_DISC_" .. closes)
 end
 function handler.message(fd, msg, sz)
-	local netpack = require "skynet.netpack"
+	local netpack = require "spacenet.netpack"
 	netpack.tostring(msg, sz)
 end
 function handler.error(fd, msg)
-	skynet.error("GATE_ERR:" .. tostring(msg))
+	spacenet.error("GATE_ERR:" .. tostring(msg))
 end
 
 gateserver.start(handler)
 `)},
 		"service/reset_main.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-skynet.start(function()
-	local gate = skynet.newservice("reset_gate")
-	skynet.call(gate, "lua", "open", {
+local spacenet = require "spacenet"
+spacenet.start(function()
+	local gate = spacenet.newservice("reset_gate")
+	spacenet.call(gate, "lua", "open", {
 		address = "127.0.0.1",
-		port = tonumber(skynet.getenv("gate_port")),
+		port = tonumber(spacenet.getenv("gate_port")),
 		maxclient = 2,
 		nodelay = true,
 	})
-	skynet.error("RESET_GATE_READY")
+	spacenet.error("RESET_GATE_READY")
 end)
 `)},
 	}
@@ -403,11 +402,11 @@ func TestWriteOverloadWarningAndRecovery(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/warn_test.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
-skynet.start(function()
-	local port = tonumber(skynet.getenv("warn_port"))
+spacenet.start(function()
+	local port = tonumber(spacenet.getenv("warn_port"))
 	local id = assert(socket.open("127.0.0.1", port))
 	local got_pos = 0
 	local got_zero = 0
@@ -417,16 +416,16 @@ skynet.start(function()
 			got_pos = got_pos + 1
 		elseif size == 0 then
 			got_zero = got_zero + 1
-			skynet.wakeup(done)
+			spacenet.wakeup(done)
 		end
 	end)
 
 	-- Episode 1: a single 128 KiB write deterministically exceeds defaultWarnSize (64 KiB).
 	local chunk = string.rep("x", 128 * 1024)
 	socket.write(id, chunk)
-	skynet.error("WARN_ENQUEUED")
+	spacenet.error("WARN_ENQUEUED")
 	if got_zero < 1 then
-		skynet.wait(done)
+		spacenet.wait(done)
 	end
 	assert(got_pos >= 1, "expected positive warning in episode 1")
 	assert(got_zero >= 1, "expected zero recovery warning in episode 1")
@@ -435,13 +434,13 @@ skynet.start(function()
 	local prev_pos, prev_zero = got_pos, got_zero
 	socket.write(id, chunk)
 	if got_zero <= prev_zero then
-		skynet.wait(done)
+		spacenet.wait(done)
 	end
 	assert(got_pos > prev_pos, "expected positive warning after threshold reset")
 	assert(got_zero > prev_zero, "expected zero recovery warning after threshold reset")
 	socket.close(id)
-	skynet.error("WARN_RECOVERY_OK")
-	skynet.exit()
+	spacenet.error("WARN_RECOVERY_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -481,27 +480,27 @@ func TestBindNonZeroFDRejectedAndOrphanListenerRetired(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/orphan_owner.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
-local driver = require "skynet.socketdriver"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
+local driver = require "spacenet.socketdriver"
 
-skynet.start(function()
+spacenet.start(function()
 	local ok, err = pcall(driver.bind, 99)
 	assert(not ok, "expected bind(99) to fail")
-	skynet.error("BIND_NONZERO_ERR_OK")
+	spacenet.error("BIND_NONZERO_ERR_OK")
 
-	local port = tonumber(skynet.getenv("orphan_port"))
+	local port = tonumber(spacenet.getenv("orphan_port"))
 	local lid = socket.listen("127.0.0.1", port)
 	socket.start(lid, function() end)
-	skynet.error("ORPHAN_LISTENING")
+	spacenet.error("ORPHAN_LISTENING")
 	-- Exit without closing lid so the listener becomes orphaned.
-	skynet.exit()
+	spacenet.exit()
 end)
 `)},
 		"service/orphan_main.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-skynet.start(function()
-	skynet.newservice("orphan_owner")
+local spacenet = require "spacenet"
+spacenet.start(function()
+	spacenet.newservice("orphan_owner")
 end)
 `)},
 	}
@@ -587,12 +586,12 @@ func TestUDPConnectCapturesPeerAtEnqueue(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/udp_cap.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
-skynet.start(function()
-	local portA = tonumber(skynet.getenv("udp_port_a"))
-	local portB = tonumber(skynet.getenv("udp_port_b"))
+spacenet.start(function()
+	local portA = tonumber(spacenet.getenv("udp_port_a"))
+	local portB = tonumber(spacenet.getenv("udp_port_b"))
 	local cli = socket.udp(function() end)
 	socket.udp_connect(cli, "127.0.0.1", portA)
 	for i = 1, 5 do
@@ -603,10 +602,10 @@ skynet.start(function()
 	for i = 1, 5 do
 		socket.write(cli, "FOR_B_" .. i)
 	end
-	skynet.sleep(20)
+	spacenet.sleep(20)
 	socket.close(cli)
-	skynet.error("UDP_CAP_DONE")
-	skynet.exit()
+	spacenet.error("UDP_CAP_DONE")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -653,15 +652,15 @@ end)
 func TestBundledLoginAndMsgServerLoad(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/load_snax_net.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local loginserver = require "snax.loginserver"
 local msgserver = require "snax.msgserver"
 
-skynet.start(function()
+spacenet.start(function()
 	assert(type(loginserver) == "function")
 	assert(type(msgserver) == "table" and type(msgserver.start) == "function")
-	skynet.error("SNAX_NET_LOAD_OK")
-	skynet.exit()
+	spacenet.error("SNAX_NET_LOAD_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -706,10 +705,10 @@ func TestBindStdinRegularFile(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/stdin_file.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
-skynet.start(function()
+spacenet.start(function()
 	local id = socket.stdin()
 	local l1 = socket.readline(id, "\n")
 	local l2 = socket.readline(id, "\n")
@@ -717,8 +716,8 @@ skynet.start(function()
 	assert(l1 == "hello-stdin", "unexpected l1: " .. tostring(l1))
 	assert(l2 == "second-line", "unexpected l2: " .. tostring(l2))
 	assert(l3 == false, "expected EOF after regular file, got: " .. tostring(l3))
-	skynet.error("STDIN_FILE_OK")
-	skynet.exit()
+	spacenet.error("STDIN_FILE_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -754,11 +753,11 @@ func TestTCPHalfCloseReadPreservesWriteSide(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/halfclose_srv.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
-skynet.start(function()
-	local port = tonumber(skynet.getenv("hc_port"))
+spacenet.start(function()
+	local port = tonumber(spacenet.getenv("hc_port"))
 	local lid = socket.listen("127.0.0.1", port)
 	socket.start(lid, function(fd, addr)
 		socket.start(fd)
@@ -768,10 +767,10 @@ skynet.start(function()
 		assert(ok, "write after peer EOF must succeed")
 		socket.close(fd)
 		socket.close(lid)
-		skynet.error("HALFCLOSE_SRV_OK")
-		skynet.exit()
+		spacenet.error("HALFCLOSE_SRV_OK")
+		spacenet.exit()
 	end)
-	skynet.error("HALFCLOSE_READY")
+	spacenet.error("HALFCLOSE_READY")
 end)
 `)},
 	}
@@ -840,34 +839,34 @@ func TestUDPConnectTransfersOwnershipToNewService(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/udp_handoff.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
 local mode, idArg, portArg = ...
 if mode == "receiver" then
 	local id = tonumber(idArg)
 	local port = tonumber(portArg)
-	skynet.start(function()
+	spacenet.start(function()
 		local done = coroutine.running()
 		socket.udp_connect(id, "127.0.0.1", port, function(str)
 			assert(str == "ECHO:HANDOFF_PING", "unexpected udp reply: " .. tostring(str))
-			skynet.wakeup(done)
+			spacenet.wakeup(done)
 		end)
 		socket.write(id, "HANDOFF_PING")
-		skynet.wait(done)
+		spacenet.wait(done)
 		socket.close(id)
-		skynet.error("UDP_HANDOFF_OK")
-		skynet.exit()
+		spacenet.error("UDP_HANDOFF_OK")
+		spacenet.exit()
 	end)
 else
-	skynet.start(function()
-		local port = tonumber(skynet.getenv("udp_echo_port"))
+	spacenet.start(function()
+		local port = tonumber(spacenet.getenv("udp_echo_port"))
 		local id = socket.udp(function()
 			error("old owner should not receive datagram after handoff")
 		end)
 		socket.abandon(id)
-		skynet.newservice("udp_handoff", "receiver", id, port)
-		skynet.exit()
+		spacenet.newservice("udp_handoff", "receiver", id, port)
+		spacenet.exit()
 	end)
 end
 `)},
@@ -909,19 +908,19 @@ func TestBindStdinCloseReopenPipe(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/stdin_reopen.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 
-skynet.start(function()
+spacenet.start(function()
 	local id1 = socket.stdin()
 	socket.close(id1)
 	local id2 = socket.stdin()
-	skynet.error("STDIN_REOPEN_READY")
+	spacenet.error("STDIN_REOPEN_READY")
 	local line = socket.readline(id2, "\n")
 	assert(line == "for-second-stdin", "unexpected line: " .. tostring(line))
 	socket.close(id2)
-	skynet.error("STDIN_REOPEN_OK")
-	skynet.exit()
+	spacenet.error("STDIN_REOPEN_OK")
+	spacenet.exit()
 end)
 `)},
 	}

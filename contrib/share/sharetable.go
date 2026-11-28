@@ -357,8 +357,8 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 				tok, _ := runtime.ExtractToken(a)
 				callArgs = append(callArgs, runtime.LightUDToken(tok))
 			case a.IsNative():
-				// Bridge skynet.unpack into the isolated matrix VM for sharetable.loadtable.
-				callArgs = append(callArgs, mL.NewFunc("skynet.unpack", func(ms *moelua.State, uargs []moelua.Value) ([]moelua.Value, error) {
+				// Bridge spacenet.unpack into the isolated matrix VM for sharetable.loadtable.
+				callArgs = append(callArgs, mL.NewFunc("spacenet.unpack", func(ms *moelua.State, uargs []moelua.Value) ([]moelua.Value, error) {
 					if len(uargs) == 0 || uargs[0].IsNil() {
 						return nil, nil
 					}

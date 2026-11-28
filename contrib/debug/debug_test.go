@@ -61,30 +61,30 @@ func TestDebugConsoleMemoryAndChannel(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/dbg_worker.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local mem = require "skynet.memory"
-local dc = require "skynet.debugchannel"
+local spacenet = require "spacenet"
+local mem = require "spacenet.memory"
+local dc = require "spacenet.debugchannel"
 
-skynet.start(function()
-	skynet.dispatch("lua", function(_, _, cmd, arg)
+spacenet.start(function()
+	spacenet.dispatch("lua", function(_, _, cmd, arg)
 		if cmd == "prof" then
-			skynet.retpack(mem.profactive())
+			spacenet.retpack(mem.profactive())
 		elseif cmd == "read_wait" then
 			local r = dc.connect(arg)
 			-- Block with a long timeout (5s); writer wakes us immediately.
 			local msg = r:read(50)
 			dc.release(r)
-			skynet.retpack(msg)
+			spacenet.retpack(msg)
 		end
 	end)
 end)
 `)},
 		"service/dbg_main.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-local mem = require "skynet.memory"
-local dc = require "skynet.debugchannel"
+local spacenet = require "spacenet"
+local mem = require "spacenet.memory"
+local dc = require "spacenet.debugchannel"
 
-skynet.start(function()
+spacenet.start(function()
 	assert(mem.total() > 0)
 	assert(mem.current() > 0)
 	local js = mem.jestat()
@@ -93,15 +93,15 @@ skynet.start(function()
 	assert(not pcall(mem.mallctl, 123))
 
 	-- profactive state is shared per-Node across actors.
-	local worker = skynet.newservice("dbg_worker")
+	local worker = spacenet.newservice("dbg_worker")
 	assert(mem.profactive() == false)
 	assert(mem.profactive(true) == true)
-	assert(skynet.call(worker, "lua", "prof") == true)
+	assert(spacenet.call(worker, "lua", "prof") == true)
 	assert(mem.profactive(false) == false)
 
 	-- memory.info() reports memory usage across all live services on the node.
 	local minfo = mem.info()
-	assert(minfo[skynet.self()] and minfo[skynet.self()] > 0, "memory.info missing self")
+	assert(minfo[spacenet.self()] and minfo[spacenet.self()] > 0, "memory.info missing self")
 	assert(minfo[worker] and minfo[worker] > 0, "memory.info missing worker service")
 
 	-- debugchannel.sethook preserves debug.getinfo(2) frame depth and invokes
@@ -155,19 +155,19 @@ skynet.start(function()
 
 	-- Blocking read wakes immediately when writer sends a message.
 	local w2, ptr2 = dc.create()
-	local t0 = skynet.hpc()
-	skynet.fork(function()
-		skynet.sleep(2)
+	local t0 = spacenet.hpc()
+	spacenet.fork(function()
+		spacenet.sleep(2)
 		w2:write("wake-now")
 	end)
-	local got = skynet.call(worker, "lua", "read_wait", ptr2)
-	local elapsed_ms = (skynet.hpc() - t0) / 1e6
+	local got = spacenet.call(worker, "lua", "read_wait", ptr2)
+	local elapsed_ms = (spacenet.hpc() - t0) / 1e6
 	assert(got == "wake-now", "unexpected wake msg: " .. tostring(got))
 	assert(elapsed_ms < 2000, "blocking read did not wake early: " .. tostring(elapsed_ms) .. "ms")
 	dc.release(w2)
 
-	skynet.newservice("debug_console", "127.0.0.1", %d)
-	skynet.error("DEBUG_READY")
+	spacenet.newservice("debug_console", "127.0.0.1", %d)
+	spacenet.error("DEBUG_READY")
 end)
 `, port))},
 	}
@@ -228,13 +228,13 @@ end)
 func TestDebugChannelReadCancelsOnNodeClose(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/dbg_block.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local dc = require "skynet.debugchannel"
+local spacenet = require "spacenet"
+local dc = require "spacenet.debugchannel"
 
-skynet.start(function()
+spacenet.start(function()
 	local w, ptr = dc.create()
 	local r = dc.connect(ptr)
-	skynet.error("BLOCK_READ_START")
+	spacenet.error("BLOCK_READ_START")
 	-- 600s timeout must unblock immediately when Node.Close() cancels the actor.
 	r:read(6000)
 	dc.release(r)

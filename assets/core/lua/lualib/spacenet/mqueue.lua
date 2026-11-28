@@ -1,7 +1,7 @@
 -- This is a deprecated module, use skynet.queue instead.
 
-local skynet = require "skynet"
-local c = require "skynet.core"
+local skynet = require "spacenet"
+local c = require "spacenet.core"
 
 local mqueue = {}
 local init_once

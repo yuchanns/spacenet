@@ -61,8 +61,8 @@ func New() *contrib.Contrib {
 			return mgr, nil
 		}),
 		contrib.WithFS(subFS),
-		contrib.WithPreload("skynet.socketdriver", preloadSocketDriver),
-		contrib.WithPreload("skynet.netpack", preloadNetpack),
+		contrib.WithPreload("spacenet.socketdriver", preloadSocketDriver),
+		contrib.WithPreload("spacenet.netpack", preloadNetpack),
 	)
 }
 

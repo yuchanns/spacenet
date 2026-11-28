@@ -1,5 +1,5 @@
-local service = require "skynet.service"
-local skynet = require "skynet.manager"	-- import skynet.launch, ...
+local service = require "spacenet.service"
+local skynet = require "spacenet.manager"	-- import skynet.launch, ...
 
 skynet.start(function()
 	local standalone = skynet.getenv "standalone"

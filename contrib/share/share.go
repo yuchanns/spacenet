@@ -9,18 +9,18 @@ import (
 )
 
 // New returns the share contrib (sharetable, datasheet, sharedata, sharemap,
-// stm, multicast), declaring a dependency on contrib/sproto for skynet.sharemap.
+// stm, multicast), declaring a dependency on contrib/sproto for spacenet.sharemap.
 func New() *contrib.Contrib {
 	return contrib.New("share",
 		contrib.WithDeps(sproto.New()),
 		contrib.WithInit(initMulticastNode),
 		contrib.WithFS(subFS),
 		contrib.WithPreloads(map[string]moelua.GoFunc{
-			"skynet.multicast.core":  preloadMulticastCore,
-			"skynet.stm":             preloadSTM,
-			"skynet.sharetable.core": preloadShareTableCore,
-			"skynet.datasheet.core":  preloadDatasheetCore,
-			"skynet.sharedata.core":  preloadShareDataCore,
+			"spacenet.multicast.core":  preloadMulticastCore,
+			"spacenet.stm":             preloadSTM,
+			"spacenet.sharetable.core": preloadShareTableCore,
+			"spacenet.datasheet.core":  preloadDatasheetCore,
+			"spacenet.sharedata.core":  preloadShareDataCore,
 		}),
 	)
 }

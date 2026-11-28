@@ -1,5 +1,5 @@
-local skynet = require "skynet"
-local sd = require "skynet.sharedata.corelib"
+local skynet = require "spacenet"
+local sd = require "spacenet.sharedata.corelib"
 
 local service
 

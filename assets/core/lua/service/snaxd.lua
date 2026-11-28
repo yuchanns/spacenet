@@ -1,8 +1,8 @@
-local skynet = require "skynet"
-local c = require "skynet.core"
+local skynet = require "spacenet"
+local c = require "spacenet.core"
 local snax_interface = require "snax.interface"
-local profile = require "skynet.profile"
-local snax = require "skynet.snax"
+local profile = require "spacenet.profile"
+local snax = require "spacenet.snax"
 
 local snax_name = tostring(...)
 local loaderpath = skynet.getenv"snax_loader"

@@ -24,7 +24,7 @@ func New() *contrib.Contrib {
 	return contrib.New("cluster",
 		contrib.WithDeps(socket.New()),
 		contrib.WithFS(subFS),
-		contrib.WithPreload("skynet.cluster.core", preloadClusterCore),
+		contrib.WithPreload("spacenet.cluster.core", preloadClusterCore),
 	)
 }
 

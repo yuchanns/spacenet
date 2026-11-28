@@ -1,6 +1,6 @@
 # contrib/crypt
 
-Cryptography contrib module for `spacenet`, providing `skynet.crypt`, `client.crypt`, `md5.core`, and `md5`.
+Cryptography contrib module for `spacenet`, providing `spacenet.crypt`, `client.crypt`, `md5.core`, and `md5`.
 
 ## Usage
 

@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	stdhttp "net/http"
@@ -33,6 +34,37 @@ import (
 	"github.com/yuchanns/spacenet/contrib/sproto"
 	sptls "github.com/yuchanns/spacenet/contrib/tls"
 )
+
+const skynetAliasPreload = `
+local function alias(name)
+	if name == "skynet" or name:sub(1, 7) == "skynet." then
+		return "spacenet" .. name:sub(7)
+	end
+	return name
+end
+local orig_require = _G.require
+_G.require = function(name) return orig_require(alias(name)) end
+local sr = orig_require("spacenet.require")
+local orig_sr = sr.require
+sr.require = function(name) return orig_sr(alias(name)) end
+`
+
+type onlyDirsFS struct {
+	base fs.FS
+	dirs []string
+}
+
+func (f onlyDirsFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return f.base.Open(name)
+	}
+	for _, d := range f.dirs {
+		if name == d || strings.HasPrefix(name, d+"/") {
+			return f.base.Open(name)
+		}
+	}
+	return nil, fs.ErrNotExist
+}
 
 type syncBuf struct {
 	mu  sync.Mutex
@@ -113,18 +145,18 @@ func generateSelfSignedCertFiles(t *testing.T) (certPath, keyPath string) {
 func TestAllContribsLoadTogether(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/all_smoke.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
-local crypt = require "skynet.crypt"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
+local crypt = require "spacenet.crypt"
 local tlshelper = require "http.tlshelper"
 local httpc = require "http.httpc"
-local cluster = require "skynet.cluster"
-local sharetable = require "skynet.sharetable"
+local cluster = require "spacenet.cluster"
+local sharetable = require "spacenet.sharetable"
 local sproto = require "sproto"
-local memory = require "skynet.memory"
-local debugchannel = require "skynet.debugchannel"
+local memory = require "spacenet.memory"
+local debugchannel = require "spacenet.debugchannel"
 
-skynet.start(function()
+spacenet.start(function()
 	assert(type(socket.listen) == "function")
 	assert(type(crypt.sha1) == "function")
 	assert(type(tlshelper.newctx) == "function")
@@ -134,8 +166,8 @@ skynet.start(function()
 	assert(type(sproto.parse) == "function")
 	assert(type(memory.info) == "function")
 	assert(type(debugchannel.create) == "function")
-	skynet.error("ALL_CONTRIBS_OK")
-	skynet.exit()
+	spacenet.error("ALL_CONTRIBS_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -226,8 +258,8 @@ func TestHTTPSAndWSSEndToEnd(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/https_wss_main.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 local httpd = require "http.httpd"
 local httpc = require "http.httpc"
 local websocket = require "http.websocket"
@@ -239,14 +271,14 @@ local HTTPS_PORT = %d
 local WSS_PORT = %d
 local GO_TLS_URL = %q
 
-skynet.start(function()
+spacenet.start(function()
 	local srv_ctx = tls.newctx()
 	srv_ctx:set_cert(CERT, KEY)
 
 	-- 1. HTTPS server (httpd + tlshelper)
 	local hfd = socket.listen("127.0.0.1", HTTPS_PORT)
 	socket.start(hfd, function(id)
-		skynet.fork(function()
+		spacenet.fork(function()
 			socket.start(id)
 			local tctx = tls.newtls("server", srv_ctx)
 			local init = tls.init_responsefunc(id, tctx)
@@ -256,7 +288,7 @@ skynet.start(function()
 			init()
 			local code, url = httpd.read_request(read, 8192)
 			if code == 200 then
-				httpd.write_response(write, 200, "skynet-https:" .. url)
+				httpd.write_response(write, 200, "spacenet-https:" .. url)
 			end
 			socket.close(id)
 			close()
@@ -266,7 +298,7 @@ skynet.start(function()
 	-- 2. WSS server (http.websocket + tlshelper)
 	local wfd = socket.listen("127.0.0.1", WSS_PORT)
 	socket.start(wfd, function(id)
-		skynet.fork(function()
+		spacenet.fork(function()
 			local handle = {}
 			function handle.message(wsid, msg)
 				websocket.write(wsid, "wss-echo:" .. msg)
@@ -275,24 +307,24 @@ skynet.start(function()
 		end)
 	end)
 
-	skynet.error("TLS_SERVERS_READY")
+	spacenet.error("TLS_SERVERS_READY")
 
-	-- 3. Skynet httpc -> Skynet HTTPS server
+	-- 3. httpc -> spacenet HTTPS server
 	local code1, body1 = httpc.get("https://127.0.0.1:" .. HTTPS_PORT, "/hello")
-	assert(code1 == 200 and body1 == "skynet-https:/hello", "skynet https failed: " .. tostring(code1) .. " " .. tostring(body1))
+	assert(code1 == 200 and body1 == "spacenet-https:/hello", "spacenet https failed: " .. tostring(code1) .. " " .. tostring(body1))
 
-	-- 4. Skynet httpc -> Go httptest.NewTLSServer
+	-- 4. httpc -> Go httptest.NewTLSServer
 	local code2, body2 = httpc.get(GO_TLS_URL, "/ping")
 	assert(code2 == 200 and body2 == "from-go-tls:/ping", "go https failed: " .. tostring(code2) .. " " .. tostring(body2))
 
-	-- 5. Skynet websocket client -> Skynet WSS server
+	-- 5. websocket client -> spacenet WSS server
 	local ws = websocket.connect("wss://127.0.0.1:" .. WSS_PORT .. "/ws")
 	websocket.write(ws, "secret-wss")
 	local msg = websocket.read(ws)
 	assert(msg == "wss-echo:secret-wss", "wss echo mismatch: " .. tostring(msg))
 	websocket.close(ws)
 
-	skynet.error("HTTPS_WSS_ALL_OK")
+	spacenet.error("HTTPS_WSS_ALL_OK")
 end)
 `, certSlash, keySlash, httpsPort, wssPort, goTLS.URL))},
 	}
@@ -330,7 +362,7 @@ end)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != 200 || string(body) != "skynet-https:/from-go-client" {
+	if resp.StatusCode != 200 || string(body) != "spacenet-https:/from-go-client" {
 		t.Fatalf("unexpected Go HTTPS response: %d %q", resp.StatusCode, string(body))
 	}
 
@@ -339,22 +371,28 @@ end)
 
 func TestUpstreamGameServerWatchdogAgentSproto(t *testing.T) {
 	gatePort := freeTCPPort(t)
+	examplesFS := onlyDirsFS{
+		base: os.DirFS("../../third_party/skynet"),
+		dirs: []string{"examples"},
+	}
 
-	// Server uses unmodified upstream third_party/skynet/examples/{protoloader,simpledb,watchdog,agent,proto}.lua.
+	// Server uses unmodified upstream third_party/skynet/examples/{protoloader,simpledb,watchdog,agent,proto}.lua
+	// via a user-side preload alias script.
 	srvFS := fstest.MapFS{
+		"skynet_alias.lua": &fstest.MapFile{Data: []byte(skynetAliasPreload)},
 		"service/game_srv_main.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-skynet.start(function()
-	skynet.uniqueservice("protoloader")
-	skynet.newservice("simpledb")
-	local watchdog = skynet.newservice("watchdog")
-	skynet.call(watchdog, "lua", "start", {
+local spacenet = require "spacenet"
+spacenet.start(function()
+	spacenet.uniqueservice("protoloader")
+	spacenet.newservice("simpledb")
+	local watchdog = spacenet.newservice("watchdog")
+	spacenet.call(watchdog, "lua", "start", {
 		address = "127.0.0.1",
 		port = %d,
 		maxclient = 64,
 		nodelay = true,
 	})
-	skynet.error("GAME_SERVER_READY")
+	spacenet.error("GAME_SERVER_READY")
 end)
 `, gatePort))},
 	}
@@ -364,9 +402,9 @@ end)
 		spacenet.WithThreads(4),
 		spacenet.WithLogOutput(srvLogs),
 		spacenet.WithContrib(socket.New(), sproto.New()),
-		spacenet.WithBaseDir("../../third_party/skynet"),
 		spacenet.WithFS(srvFS),
-		spacenet.WithFS(os.DirFS("../../third_party/skynet")),
+		spacenet.WithFS(examplesFS),
+		spacenet.WithEnv("preload", "./skynet_alias.lua"),
 		spacenet.WithEnv("luaservice", "./service/?.lua;./examples/?.lua"),
 		spacenet.WithEnv("lua_path", "./lualib/?.lua;./lualib/?/init.lua;./examples/?.lua"),
 		spacenet.WithStart("game_srv_main"),
@@ -383,8 +421,8 @@ end)
 	// Client node speaks 2-byte big-endian framed sproto against upstream watchdog+agent.
 	cliFS := fstest.MapFS{
 		"service/game_cli.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+local socket = require "spacenet.socket"
 local sproto = require "sproto"
 local proto = require "proto"
 
@@ -398,7 +436,7 @@ local function recv_pkg(fd)
 	return assert(socket.read(fd, sz))
 end
 
-skynet.start(function()
+spacenet.start(function()
 	local host = sproto.new(proto.s2c):host "package"
 	local req = host:attach(sproto.new(proto.c2s))
 	local fd = assert(socket.open("127.0.0.1", %d))
@@ -427,14 +465,14 @@ skynet.start(function()
 		if g and g.result == "Motoko" then
 			break
 		end
-		skynet.sleep(5)
+		spacenet.sleep(5)
 	end
 	assert(g and g.result == "Motoko", "unexpected get result: " .. tostring(g and g.result))
 
 	send_pkg(fd, req("quit", nil, sess))
 	socket.close(fd)
-	skynet.error("GAME_CLIENT_OK")
-	skynet.exit()
+	spacenet.error("GAME_CLIENT_OK")
+	spacenet.exit()
 end)
 `, gatePort))},
 	}
@@ -445,7 +483,7 @@ end)
 		spacenet.WithLogOutput(cliLogs),
 		spacenet.WithContrib(socket.New(), sproto.New()),
 		spacenet.WithFS(cliFS),
-		spacenet.WithFS(os.DirFS("../../third_party/skynet")),
+		spacenet.WithFS(examplesFS),
 		spacenet.WithEnv("lua_path", "./lualib/?.lua;./lualib/?/init.lua;./examples/?.lua"),
 		spacenet.WithStart("game_cli"),
 	)
@@ -466,39 +504,39 @@ func TestUpstreamShareMapWithSproto(t *testing.T) {
 	}
 	customFS := fstest.MapFS{
 		"service/sm_verify.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-local sharemap = require "skynet.sharemap"
+local spacenet = require "spacenet"
+local sharemap = require "spacenet.sharemap"
 local mode = ...
 
 if mode == "slave" then
 	local reader
-	skynet.start(function()
-		skynet.dispatch("lua", function(_, _, cmd, ...)
+	spacenet.start(function()
+		spacenet.dispatch("lua", function(_, _, cmd, ...)
 			if cmd == "init" then
 				reader = sharemap.reader(...)
-				skynet.ret()
+				spacenet.ret()
 			elseif cmd == "read" then
 				reader:update()
-				skynet.ret(skynet.pack(reader.x, reader.y, reader.s))
+				spacenet.ret(spacenet.pack(reader.x, reader.y, reader.s))
 			end
 		end)
 	end)
 else
-	skynet.start(function()
+	spacenet.start(function()
 		sharemap.register(%q)
-		local slave = skynet.newservice("sm_verify", "slave")
+		local slave = spacenet.newservice("sm_verify", "slave")
 		local writer = sharemap.writer("foobar", { x = 0, y = 0, s = "hello" })
-		skynet.call(slave, "lua", "init", "foobar", writer:copy())
+		spacenet.call(slave, "lua", "init", "foobar", writer:copy())
 
 		writer.x = 7
 		writer.y = 42
 		writer.s = "spacenet"
 		writer:commit()
 
-		local x, y, s = skynet.call(slave, "lua", "read")
+		local x, y, s = spacenet.call(slave, "lua", "read")
 		assert(x == 7 and y == 42 and s == "spacenet", string.format("got %%s %%s %%s", x, y, s))
-		skynet.error("SHAREMAP_OK")
-		skynet.exit()
+		spacenet.error("SHAREMAP_OK")
+		spacenet.exit()
 	end)
 end
 `, filepath.ToSlash(spPath)))},
@@ -509,7 +547,6 @@ end
 		spacenet.WithThreads(4),
 		spacenet.WithLogOutput(logs),
 		spacenet.WithContrib(share.New(), sproto.New()),
-		spacenet.WithBaseDir("../../third_party/skynet"),
 		spacenet.WithFS(customFS),
 		spacenet.WithStart("sm_verify"),
 	)
@@ -528,58 +565,58 @@ func TestScale1000ConcurrentGameAgents(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/scale_agent.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 local id = tonumber(...)
 local x, y = id, id * 2
 
-skynet.start(function()
-	skynet.dispatch("lua", function(_, _, cmd, dx, dy)
+spacenet.start(function()
+	spacenet.dispatch("lua", function(_, _, cmd, dx, dy)
 		if cmd == "move" then
 			x = x + dx
 			y = y + dy
-			skynet.ret(skynet.pack(id, x, y))
+			spacenet.ret(spacenet.pack(id, x, y))
 		elseif cmd == "stop" then
-			skynet.ret(skynet.pack(true))
-			skynet.exit()
+			spacenet.ret(spacenet.pack(true))
+			spacenet.exit()
 		end
 	end)
 end)
 `)},
 		"service/scale_main.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
+local spacenet = require "spacenet"
 
-skynet.start(function()
+spacenet.start(function()
 	local agents = {}
 	for i = 1, %d do
-		agents[i] = skynet.newservice("scale_agent", i)
+		agents[i] = spacenet.newservice("scale_agent", i)
 	end
-	skynet.error("SPAWN_1000_DONE")
+	spacenet.error("SPAWN_1000_DONE")
 
 	-- Fan out concurrent RPCs to all 1,000 isolated Lua VM actors
-	local rpc_t0 = skynet.hpc()
+	local rpc_t0 = spacenet.hpc()
 	local done = 0
 	local main_co = coroutine.running()
 	for i = 1, %d do
-		skynet.fork(function()
-			local rid, rx, ry = skynet.call(agents[i], "lua", "move", 3, 5)
+		spacenet.fork(function()
+			local rid, rx, ry = spacenet.call(agents[i], "lua", "move", 3, 5)
 			assert(rid == i and rx == i + 3 and ry == i * 2 + 5)
 			done = done + 1
 			if done == %d then
-				skynet.wakeup(main_co)
+				spacenet.wakeup(main_co)
 			end
 		end)
 	end
 	if done < %d then
-		skynet.wait(main_co)
+		spacenet.wait(main_co)
 	end
-	local rpc_ms = (skynet.hpc() - rpc_t0) / 1e6
-	skynet.error(string.format("RPC_1000_DONE %%.2fms", rpc_ms))
+	local rpc_ms = (spacenet.hpc() - rpc_t0) / 1e6
+	spacenet.error(string.format("RPC_1000_DONE %%.2fms", rpc_ms))
 
 	for i = 1, %d do
-		skynet.call(agents[i], "lua", "stop")
+		spacenet.call(agents[i], "lua", "stop")
 	end
-	skynet.error("STOP_1000_DONE")
-	skynet.exit()
+	spacenet.error("STOP_1000_DONE")
+	spacenet.exit()
 end)
 `, numAgents, numAgents, numAgents, numAgents, numAgents))},
 	}

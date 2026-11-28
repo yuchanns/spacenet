@@ -64,8 +64,8 @@
 -- }
 --]]
 
-local skynet = require "skynet"
-local socket = require "skynet.socket"
+local skynet = require "spacenet"
+local socket = require "spacenet.socket"
 
 local MAX_DOMAIN_LEN = 1024
 local MAX_LABEL_LEN = 63

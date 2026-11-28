@@ -1,6 +1,6 @@
-local skynet = require "skynet"
-require "skynet.manager"	-- import skynet.register
-local snax = require "skynet.snax"
+local skynet = require "spacenet"
+require "spacenet.manager"	-- import skynet.register
+local snax = require "spacenet.snax"
 
 local cmd = {}
 local service = {}

@@ -45,7 +45,7 @@ do
 		if loading_queue then
 			assert(loading_queue.co ~= co, "circular dependency")
 			-- Module is in the init process (require the same mod at the same time in different coroutines) , waiting.
-			local skynet = require "skynet"
+			local skynet = require "spacenet"
 			loading_queue[#loading_queue+1] = co
 			skynet.wait(co)
 			local m = loaded[name]
@@ -83,7 +83,7 @@ do
 
 		local waiting = #loading_queue
 		if waiting > 0 then
-			local skynet = require "skynet"
+			local skynet = require "spacenet"
 			for i = 1, waiting do
 				skynet.wakeup(loading_queue[i])
 			end

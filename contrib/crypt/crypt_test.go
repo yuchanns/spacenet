@@ -2,6 +2,7 @@ package crypt_test
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -12,6 +13,37 @@ import (
 	"github.com/yuchanns/spacenet"
 	"github.com/yuchanns/spacenet/contrib/crypt"
 )
+
+const skynetAliasPreload = `
+local function alias(name)
+	if name == "skynet" or name:sub(1, 7) == "skynet." then
+		return "spacenet" .. name:sub(7)
+	end
+	return name
+end
+local orig_require = _G.require
+_G.require = function(name) return orig_require(alias(name)) end
+local sr = orig_require("spacenet.require")
+local orig_sr = sr.require
+sr.require = function(name) return orig_sr(alias(name)) end
+`
+
+type onlyDirsFS struct {
+	base fs.FS
+	dirs []string
+}
+
+func (f onlyDirsFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return f.base.Open(name)
+	}
+	for _, d := range f.dirs {
+		if name == d || strings.HasPrefix(name, d+"/") {
+			return f.base.Open(name)
+		}
+	}
+	return nil, fs.ErrNotExist
+}
 
 type syncBuf struct {
 	mu  sync.Mutex
@@ -41,18 +73,14 @@ func waitLog(t *testing.T, buf *syncBuf, substr string) {
 	t.Fatalf("timeout waiting for %q\nlogs:\n%s", substr, buf.String())
 }
 
-func TestUpstreamCryptAndSHA1Vectors(t *testing.T) {
+func TestNativeCryptAndMD5(t *testing.T) {
 	customFS := fstest.MapFS{
-		"service/crypt_suite.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local crypt = require "skynet.crypt"
+		"service/crypt_native.lua": &fstest.MapFile{Data: []byte(`
+local spacenet = require "spacenet"
+local crypt = require "spacenet.crypt"
 local md5 = require "md5"
 
-skynet.start(function()
-	-- Run upstream testcrypt.lua assertions
-	dofile("./test/testcrypt.lua")
-
-	-- Verify DH64 key exchange, hmac64, hmac64_md5, hashkey, hex, base64, xor, md5
+spacenet.start(function()
 	local k1 = crypt.randomkey()
 	local k2 = crypt.randomkey()
 	local e1 = crypt.dhexchange(k1)
@@ -72,11 +100,8 @@ skynet.start(function()
 	local enc = md5.crypt("secret payload", "mykey", "12345678")
 	assert(md5.decrypt(enc, "mykey") == "secret payload")
 
-	-- Run upstream 199-vector SHA1 + HMAC-SHA1 suite (test/testsha.lua)
-	assert(loadfile("./test/testsha.lua"))()
-
-	skynet.error("CRYPT_ALL_PASSED")
-	skynet.exit()
+	spacenet.error("CRYPT_NATIVE_OK")
+	spacenet.exit()
 end)
 `)},
 	}
@@ -87,7 +112,43 @@ end)
 		spacenet.WithLogOutput(logs),
 		spacenet.WithContrib(crypt.New()),
 		spacenet.WithFS(customFS),
-		spacenet.WithFS(os.DirFS("../../third_party/skynet")),
+		spacenet.WithStart("crypt_native"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	if err := node.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitLog(t, logs, "CRYPT_NATIVE_OK")
+}
+
+func TestUpstreamCryptAndSHA1Vectors(t *testing.T) {
+	customFS := fstest.MapFS{
+		"skynet_alias.lua": &fstest.MapFile{Data: []byte(skynetAliasPreload)},
+		"service/crypt_suite.lua": &fstest.MapFile{Data: []byte(`
+local spacenet = require "spacenet"
+
+spacenet.start(function()
+	-- Run unmodified upstream testcrypt.lua and 199-vector SHA1/HMAC-SHA1 suite via user preload alias.
+	dofile("./test/testcrypt.lua")
+	assert(loadfile("./test/testsha.lua"))()
+
+	spacenet.error("CRYPT_ALL_PASSED")
+	spacenet.exit()
+end)
+`)},
+	}
+
+	logs := &syncBuf{}
+	node, err := spacenet.New(
+		spacenet.WithThreads(2),
+		spacenet.WithLogOutput(logs),
+		spacenet.WithContrib(crypt.New()),
+		spacenet.WithFS(customFS),
+		spacenet.WithFS(onlyDirsFS{base: os.DirFS("../../third_party/skynet"), dirs: []string{"test"}}),
+		spacenet.WithEnv("preload", "./skynet_alias.lua"),
 		spacenet.WithStart("crypt_suite"),
 	)
 	if err != nil {

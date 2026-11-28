@@ -1,6 +1,6 @@
 -- read https://github.com/cloudwu/skynet/wiki/FAQ for the module "skynet.core"
-local c = require "skynet.core"
-local skynet_require = require "skynet.require"
+local c = require "spacenet.core"
+local skynet_require = require "spacenet.require"
 local tostring = tostring
 local coroutine = coroutine
 local assert = assert
@@ -46,7 +46,7 @@ local skynet = {
 }
 
 -- code cache
-skynet.cache = require "skynet.codecache"
+skynet.cache = require "spacenet.codecache"
 skynet._proto = proto
 
 function skynet.register_protocol(class)
@@ -1183,7 +1183,7 @@ function skynet.memlimit(bytes)
 end
 
 -- Inject internal debug framework
-local debug = require "skynet.debug"
+local debug = require "spacenet.debug"
 debug.init(skynet, {
 	dispatch = skynet.dispatch_message,
 	suspend = suspend,

@@ -3,6 +3,7 @@ package http_test
 import (
 	"bytes"
 	"io"
+	"io/fs"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,23 @@ import (
 	"github.com/yuchanns/spacenet"
 	httpContrib "github.com/yuchanns/spacenet/contrib/http"
 )
+
+type onlyDirsFS struct {
+	base fs.FS
+	dirs []string
+}
+
+func (f onlyDirsFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return f.base.Open(name)
+	}
+	for _, d := range f.dirs {
+		if name == d || strings.HasPrefix(name, d+"/") {
+			return f.base.Open(name)
+		}
+	}
+	return nil, fs.ErrNotExist
+}
 
 type syncBuf struct {
 	mu  sync.Mutex
@@ -44,7 +62,7 @@ func waitLog(t *testing.T, buf *syncBuf, substr string) {
 	t.Fatalf("timeout waiting for %q\nlogs:\n%s", substr, buf.String())
 }
 
-func TestSkynetHTTPDAndHTTPCAndWebSocketAndGoBridge(t *testing.T) {
+func TestSpacenetHTTPDAndHTTPCAndWebSocketAndGoBridge(t *testing.T) {
 	// Local Go httptest backend for http.httpc client check.
 	goSrv := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		w.Header().Set("X-From", "go-httptest")
@@ -54,38 +72,38 @@ func TestSkynetHTTPDAndHTTPCAndWebSocketAndGoBridge(t *testing.T) {
 
 	customFS := fstest.MapFS{
 		"service/web_suite.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-require "skynet.manager"
-local socket = require "skynet.socket"
+local spacenet = require "spacenet"
+require "spacenet.manager"
+local socket = require "spacenet.socket"
 local httpd = require "http.httpd"
 local httpc = require "http.httpc"
 local sockethelper = require "http.sockethelper"
 local urllib = require "http.url"
 local websocket = require "http.websocket"
 
-skynet.start(function()
+spacenet.start(function()
 	-- 1. Register Go net/http.Handler bridge target
-	skynet.dispatch("lua", function(session, source, req)
+	spacenet.dispatch("lua", function(session, source, req)
 		local cookie = req.headers and req.headers["cookie"] or ""
-		skynet.retpack(201, "lua-handled:" .. req.method .. ":" .. req.path .. ":" .. req.body .. ":" .. cookie, {
+		spacenet.retpack(201, "lua-handled:" .. req.method .. ":" .. req.path .. ":" .. req.body .. ":" .. cookie, {
 			["Content-Type"] = "text/plain",
 			["X-Actor"] = "spacenet",
 			["Set-Cookie"] = { "a=1", "b=2" },
 		})
 	end)
-	skynet.register(".web_bridge")
+	spacenet.register(".web_bridge")
 
 	-- Verify http.tlshelper loads cleanly via declared contrib/tls dependency
 	local tlshelper = require "http.tlshelper"
 	assert(type(tlshelper.newctx) == "function")
 
 	-- 2. Test http.httpc against Go httptest server
-	local goHost = skynet.getenv("go_http_host")
+	local goHost = spacenet.getenv("go_http_host")
 	local status, body = httpc.get(goHost, "/ping")
 	assert(status == 200, "unexpected status: " .. tostring(status))
 	assert(body == "hello-from-go:/ping", "unexpected body: " .. tostring(body))
 
-	-- 3. Test Skynet http.httpd server + http.httpc client loopback
+	-- 3. Test http.httpd server + http.httpc client loopback
 	local lid, _, port = socket.listen("127.0.0.1", 0)
 	socket.start(lid, function(id)
 		socket.start(id)
@@ -101,7 +119,7 @@ skynet.start(function()
 	assert(s2 == 200 and b2 == "httpd:/hello:world", tostring(s2) .. ":" .. tostring(b2))
 	socket.close(lid)
 
-	-- 4. Test Skynet http.websocket server + client end-to-end
+	-- 4. Test http.websocket server + client end-to-end
 	local wlid, _, wport = socket.listen("127.0.0.1", 0)
 	socket.start(wlid, function(id)
 		local handle = {
@@ -118,10 +136,25 @@ skynet.start(function()
 	websocket.close(ws)
 	socket.close(wlid)
 
-	-- 5. Run upstream standalone testwebsocket.lua framing tests (7 cases)
-	assert(loadfile("./test/testwebsocket.lua"))()
+	-- 5. Run unmodified upstream testwebsocket.lua framing tests (7 cases) against contrib/http's websocket.lua
+	local orig_loadfile = loadfile
+	local wsEnv = setmetatable({
+		loadfile = function(path, mode, fenv)
+			if path == "lualib/http/websocket.lua" and type(fenv) == "table" and type(fenv.require) == "function" then
+				local inner_req = fenv.require
+				fenv.require = function(name)
+					if name == "spacenet" or name:sub(1, 9) == "spacenet." then
+						return inner_req("skynet" .. name:sub(9))
+					end
+					return inner_req(name)
+				end
+			end
+			return orig_loadfile(path, mode, fenv)
+		end,
+	}, { __index = _G })
+	assert(orig_loadfile("./test/testwebsocket.lua", "t", wsEnv))()
 
-	skynet.error("WEB_SUITE_OK")
+	spacenet.error("WEB_SUITE_OK")
 end)
 `)},
 	}
@@ -130,9 +163,9 @@ end)
 	node, err := spacenet.New(
 		spacenet.WithThreads(4),
 		spacenet.WithLogOutput(logs),
-		spacenet.WithContrib(httpContrib.New()), // auto-pulls socket + crypt!
+		spacenet.WithContrib(httpContrib.New()), // auto-pulls socket + crypt + tls
 		spacenet.WithFS(customFS),
-		spacenet.WithFS(os.DirFS("../../third_party/skynet")),
+		spacenet.WithFS(onlyDirsFS{base: os.DirFS("../../third_party/skynet"), dirs: []string{"test"}}),
 		spacenet.WithEnv("go_http_host", strings.TrimPrefix(goSrv.URL, "http://")),
 		spacenet.WithStart("web_suite"),
 	)

@@ -1,7 +1,7 @@
-local skynet = require "skynet"
-local debugchannel = require "skynet.debugchannel"
-local socketdriver = require "skynet.socketdriver"
-local injectrun = require "skynet.injectcode"
+local skynet = require "spacenet"
+local debugchannel = require "spacenet.debugchannel"
+local socketdriver = require "spacenet.socketdriver"
+local injectrun = require "spacenet.injectcode"
 local table = table
 local debug = debug
 local coroutine = coroutine

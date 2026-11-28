@@ -63,18 +63,18 @@ func TestTwoNodeClusterRPCAndLargeMultipart(t *testing.T) {
 
 	serverFS := fstest.MapFS{
 		"service/node_a.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-local cluster = require "skynet.cluster"
+local spacenet = require "spacenet"
+local cluster = require "spacenet.cluster"
 
-skynet.start(function()
+spacenet.start(function()
 	local pushed = nil
-	skynet.dispatch("lua", function(session, source, cmd, arg)
+	spacenet.dispatch("lua", function(session, source, cmd, arg)
 		if cmd == "echo" then
-			skynet.retpack("A:" .. arg)
+			spacenet.retpack("A:" .. arg)
 		elseif cmd == "push_msg" then
 			pushed = arg
 		elseif cmd == "get_pushed" then
-			skynet.retpack(pushed)
+			spacenet.retpack(pushed)
 		elseif cmd == "fail" then
 			error("boom-from-node-a")
 		end
@@ -82,19 +82,19 @@ skynet.start(function()
 	cluster.reload {
 		db = %q,
 	}
-	cluster.register("echo_svc", skynet.self())
+	cluster.register("echo_svc", spacenet.self())
 	cluster.open("db")
-	skynet.error("NODE_A_READY")
+	spacenet.error("NODE_A_READY")
 end)
 `, addr))},
 	}
 
 	clientFS := fstest.MapFS{
 		"service/node_b.lua": &fstest.MapFile{Data: []byte(fmt.Sprintf(`
-local skynet = require "skynet"
-local cluster = require "skynet.cluster"
+local spacenet = require "spacenet"
+local cluster = require "spacenet.cluster"
 
-skynet.start(function()
+spacenet.start(function()
 	cluster.reload {
 		db = %q,
 	}
@@ -122,21 +122,21 @@ skynet.start(function()
 		if r3b == bigPush then
 			break
 		end
-		skynet.sleep(2)
+		spacenet.sleep(2)
 	end
 	assert(r3b == bigPush, "multipart push mismatch: len=" .. tostring(#(r3b or "")))
 
 	-- Cluster proxy
 	local proxy = cluster.proxy("db", "@echo_svc")
-	local r4 = skynet.call(proxy, "lua", "echo", "via-proxy")
+	local r4 = spacenet.call(proxy, "lua", "echo", "via-proxy")
 	assert(r4 == "A:via-proxy", "unexpected proxy: " .. tostring(r4))
 
 	-- Remote error propagation
 	local okErr = pcall(cluster.call, "db", "@echo_svc", "fail")
 	assert(not okErr, "expected remote error to fail cluster.call")
 
-	skynet.error("CLUSTER_E2E_OK")
-	skynet.exit()
+	spacenet.error("CLUSTER_E2E_OK")
+	spacenet.exit()
 end)
 `, addr))},
 	}
@@ -179,10 +179,10 @@ end)
 func TestClusterCoreFramingAndBounds(t *testing.T) {
 	customFS := fstest.MapFS{
 		"service/core_bounds.lua": &fstest.MapFile{Data: []byte(`
-local skynet = require "skynet"
-local core = require "skynet.cluster.core"
+local spacenet = require "spacenet"
+local core = require "spacenet.cluster.core"
 
-skynet.start(function()
+spacenet.start(function()
 	assert(core.isname("@svc") == true)
 	assert(core.isname("svc") == nil)
 	assert(core.isname(123) == nil)
@@ -195,12 +195,12 @@ skynet.start(function()
 	assert(tag == "trace-id-42", "trace mismatch: " .. tostring(tag))
 
 	-- Numeric address single-packet round-trip
-	local msg, sz = skynet.pack("ping", 123)
+	local msg, sz = spacenet.pack("ping", 123)
 	local req, nextSess = core.packrequest(0x102, 7, msg, sz)
 	assert(nextSess == 8)
 	local addr, sess, umsg, usz = core.unpackrequest(req:sub(3))
 	assert(addr == 0x102 and sess == 7 and usz == sz)
-	local a, b = skynet.unpack(umsg, usz)
+	local a, b = spacenet.unpack(umsg, usz)
 	assert(a == "ping" and b == 123)
 	-- Consume umsg via append + concat
 	local acc = {}
@@ -208,7 +208,7 @@ skynet.start(function()
 	core.append(acc, umsg, usz)
 	local cmsg, csz = core.concat(acc)
 	assert(csz == usz)
-	local ca, cb = skynet.unpack(cmsg, csz)
+	local ca, cb = spacenet.unpack(cmsg, csz)
 	assert(ca == "ping" and cb == 123)
 	-- Free cmsg via packrequest
 	local _ = core.packrequest("@dst", 1, cmsg, csz)
@@ -219,9 +219,9 @@ skynet.start(function()
 	assert(core.concat({ 2, "abcd" }) == nil)
 
 	-- Invalid session / negative size in packrequest must error and free buffer
-	local m1, s1 = skynet.pack("x")
+	local m1, s1 = spacenet.pack("x")
 	assert(not pcall(core.packrequest, "@dst", 0, m1, s1))
-	local m2, _ = skynet.pack("y")
+	local m2, _ = spacenet.pack("y")
 	assert(not pcall(core.packrequest, "@dst", 1, m2, -5))
 
 	-- Error response round-trip
@@ -229,8 +229,8 @@ skynet.start(function()
 	local rsess, rok, rmsg = core.unpackresponse(errResp:sub(3))
 	assert(rsess == 9 and rok == false and rmsg == "err-detail")
 
-	skynet.error("CLUSTER_CORE_BOUNDS_OK")
-	skynet.exit()
+	spacenet.error("CLUSTER_CORE_BOUNDS_OK")
+	spacenet.exit()
 end)
 `)},
 	}

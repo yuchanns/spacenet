@@ -1,7 +1,7 @@
-local skynet = require "skynet"
-local dump = require "skynet.datasheet.dump"
-local core = require "skynet.datasheet.core"
-local service = require "skynet.service"
+local skynet = require "spacenet"
+local dump = require "spacenet.datasheet.dump"
+local core = require "spacenet.datasheet.core"
+local service = require "spacenet.service"
 
 local builder = {}
 
@@ -64,7 +64,7 @@ end
 
 local function datasheet_service()
 
-local skynet = require "skynet"
+local skynet = require "spacenet"
 
 local datasheet = {}
 local handles = {}	-- handle:{ ref:count , name:name , collect:resp }

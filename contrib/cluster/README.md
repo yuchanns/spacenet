@@ -1,6 +1,6 @@
 # contrib/cluster
 
-Multi-node RPC and cluster framing contrib module for `spacenet`, providing `skynet.cluster.core`, `skynet.cluster`, `clusterd`, `clusteragent`, `clustersender`, and `clusterproxy`.
+Multi-node RPC and cluster framing contrib module for `spacenet`, providing `spacenet.cluster.core`, `spacenet.cluster`, `clusterd`, `clusteragent`, `clustersender`, and `clusterproxy`.
 
 Declares `contrib/socket` as a dependency.
 
