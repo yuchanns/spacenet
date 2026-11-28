@@ -21,7 +21,7 @@ spacenet config.lua
 | `-threads` | `0` (`NumCPU`) | Number of actor worker goroutines |
 | `-start` | `""` | Override the `start` Lua service launched by `bootstrap` |
 | `-basedir` | `""` | Base directory for resolving relative Lua paths |
-| `-jit` | `false` | Enable MoeLua's native JIT tier on supported platforms |
+| `-jit` | `true` | Enable MoeLua's native JIT tier on supported platforms |
 | `-version` | `false` | Print version information and exit |
 
 ## License

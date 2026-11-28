@@ -46,7 +46,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		threads     = fs.Int("threads", 0, "number of actor worker goroutines (0 = NumCPU)")
 		startSvc    = fs.String("start", "", "override start Lua service launched by bootstrap")
 		baseDir     = fs.String("basedir", "", "base directory for resolving relative Lua paths")
-		enableJIT   = fs.Bool("jit", false, "enable MoeLua native JIT tier on supported platforms")
+		enableJIT   = fs.Bool("jit", true, "enable MoeLua native JIT tier on supported platforms")
 		showVersion = fs.Bool("version", false, "print spacenet version and exit")
 	)
 	fs.Usage = func() {
@@ -78,12 +78,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		spacenet.WithContrib(all.Contribs()...),
 	}
 	if fs.NArg() == 1 {
-		cfgOpt, err := spacenet.LoadConfigFile(fs.Arg(0))
+		cfgOpts, err := loadConfigFile(fs.Arg(0))
 		if err != nil {
 			fmt.Fprintf(stderr, "spacenet: %v\n", err)
 			return 1
 		}
-		opts = append(opts, cfgOpt)
+		opts = append(opts, cfgOpts...)
 	}
 	if *threads > 0 {
 		opts = append(opts, spacenet.WithThreads(*threads))

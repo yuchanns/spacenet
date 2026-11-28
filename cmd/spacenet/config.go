@@ -1,4 +1,4 @@
-package spacenet
+package main
 
 import (
 	"fmt"
@@ -8,45 +8,40 @@ import (
 	"strings"
 
 	"github.com/yuchanns/moelua"
+	"github.com/yuchanns/spacenet"
 )
 
-// LoadConfigFile evaluates a Skynet Lua configuration file (supporting Skynet's
-// `include "path"` directive and `$ENV_VAR` expansion) and returns an Option
-// applying its environment variables, thread count, harbor, logger, and bootstrap.
-func LoadConfigFile(filename string) (Option, error) {
-	env, err := ParseConfigFile(filename)
+// loadConfigFile evaluates a Skynet Lua configuration file (supporting Skynet's
+// `include "path"` directive and `$ENV_VAR` expansion) and returns spacenet
+// options applying its environment variables, thread count, harbor, logger, and bootstrap.
+func loadConfigFile(filename string) ([]spacenet.Option, error) {
+	env, err := parseConfigFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	return func(c *nodeConfig) {
-		if c.rt.Env == nil {
-			c.rt.Env = make(map[string]string, len(env))
+	opts := []spacenet.Option{spacenet.WithEnvMap(env)}
+	if t, ok := env["thread"]; ok {
+		if n, err := strconv.Atoi(t); err == nil && n > 0 {
+			opts = append(opts, spacenet.WithThreads(n))
 		}
-		for k, v := range env {
-			c.rt.Env[k] = v
+	}
+	if h, ok := env["harbor"]; ok {
+		if n, err := strconv.Atoi(h); err == nil && n >= 0 && n <= 255 {
+			opts = append(opts, spacenet.WithHarbor(uint8(n)))
 		}
-		if t, ok := env["thread"]; ok {
-			if n, err := strconv.Atoi(t); err == nil && n > 0 {
-				c.rt.Threads = n
-			}
-		}
-		if h, ok := env["harbor"]; ok {
-			if n, err := strconv.Atoi(h); err == nil && n >= 0 && n <= 255 {
-				c.rt.Harbor = uint8(n)
-			}
-		}
-		if b, ok := env["bootstrap"]; ok && b != "" {
-			c.rt.Bootstrap = b
-		}
-		if lf, ok := env["logger"]; ok && lf != "" {
-			c.rt.LoggerFile = lf
-		}
-	}, nil
+	}
+	if b, ok := env["bootstrap"]; ok && b != "" {
+		opts = append(opts, spacenet.WithBootstrap(b))
+	}
+	if lf, ok := env["logger"]; ok && lf != "" {
+		opts = append(opts, spacenet.WithLoggerFile(lf))
+	}
+	return opts, nil
 }
 
-// ParseConfigFile evaluates a Skynet Lua configuration file into a string map
+// parseConfigFile evaluates a Skynet Lua configuration file into a string map
 // matching skynet-src/skynet_main.c's load_config script.
-func ParseConfigFile(filename string) (map[string]string, error) {
+func parseConfigFile(filename string) (map[string]string, error) {
 	s := moelua.New()
 	defer s.Close()
 

@@ -47,6 +47,9 @@ func TestRunVersionAndHelp(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Usage: spacenet") {
 		t.Fatalf("unexpected -h output: %q", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "-jit") || !strings.Contains(stderr.String(), "(default true)") {
+		t.Fatalf("expected -jit default true in -h output, got:\n%s", stderr.String())
+	}
 }
 
 func TestRunValidationErrors(t *testing.T) {
@@ -125,16 +128,26 @@ greeting = "spacenet-cli"
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "default_jit", args: []string{"-basedir", dir, cfgPath}},
+		{name: "jit_disabled", args: []string{"-jit=false", "-basedir", dir, cfgPath}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 
-	var stdout, stderr syncBuf
-	code := run(ctx, []string{"-basedir", dir, cfgPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run() exit code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "CLI_HELLO:spacenet-cli:b2s=") {
-		t.Fatalf("expected CLI_HELLO log, got stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+			var stdout, stderr syncBuf
+			code := run(ctx, tc.args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() exit code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "CLI_HELLO:spacenet-cli:b2s=") {
+				t.Fatalf("expected CLI_HELLO log, got stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
