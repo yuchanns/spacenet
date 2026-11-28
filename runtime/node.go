@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	stdruntime "runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +49,6 @@ type Config struct {
 	ContribFS       []fs.FS
 	Preloads        map[string]moelua.GoFunc
 	Services        map[string]ServiceFactory
-	LuaProfiles     map[string]LuaProfile
 	InitHooks       []InitHook
 }
 
@@ -172,10 +169,9 @@ type Node struct {
 	timer   *TimerManager
 	msgs    *MsgRegistry
 	objs    *ObjRegistry
-	vfs            *LayeredFS
-	cache          *CodeCache
-	preloads       map[string]moelua.GoFunc
-	defaultLuaTmpl *LuaTemplate
+	vfs     *LayeredFS
+	cache   *CodeCache
+	tmpl    *moelua.Template
 
 	envMu sync.RWMutex
 	env   map[string]string
@@ -281,46 +277,29 @@ func NewNode(cfg Config) (*Node, error) {
 		closeCh:    make(chan struct{}),
 	}
 
+	n.services["logger"] = newLoggerService
+	n.services["snlua"] = newSnluaService
+	n.services["harbor"] = newLocalHarborService
+
+	// Collect configured services and preloads.
+	for name, factory := range cfg.Services {
+		if name != "" && factory != nil {
+			n.services[name] = factory
+		}
+	}
 	preloads := make(map[string]moelua.GoFunc, len(cfg.Preloads))
 	for name, loader := range cfg.Preloads {
 		if name != "" && loader != nil {
 			preloads[name] = loader
 		}
 	}
-	n.preloads = preloads
 
-	// Build default "snlua" LuaTemplate once for fast actor cloning.
-	defaultLuaTmpl, err := n.NewLuaTemplate(LuaProfile{})
+	// Build shared compacted MoeLua Template ONCE for fast actor cloning.
+	tmpl, err := n.buildLuaTemplate(preloads)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("spacenet: build lua template: %w", err)
 	}
-	n.defaultLuaTmpl = defaultLuaTmpl
-
-	n.services["logger"] = newLoggerService
-	n.services["snlua"] = defaultLuaTmpl.NewService
-	n.services["harbor"] = newLocalHarborService
-
-	// Collect configured native services.
-	for name, factory := range cfg.Services {
-		if name != "" && factory != nil {
-			n.services[name] = factory
-		}
-	}
-
-	// Build and register named Lua profiles deterministically.
-	for _, name := range slices.Sorted(maps.Keys(cfg.LuaProfiles)) {
-		if name == "" {
-			return nil, errors.New("spacenet: lua profile name cannot be empty")
-		}
-		lt, err := n.NewLuaTemplate(cfg.LuaProfiles[name])
-		if err != nil {
-			return nil, fmt.Errorf("spacenet: lua profile %q: %w", name, err)
-		}
-		n.services[name] = lt.NewService
-		if name == "snlua" {
-			n.defaultLuaTmpl = lt
-		}
-	}
+	n.tmpl = tmpl
 
 	// Initialize TimerManager.
 	n.timer = NewTimerManager(func(handle uint32, session int32) {
@@ -567,56 +546,9 @@ func (n *Node) Close() error {
 	return nil
 }
 
-// RegisterService registers or replaces a named ServiceFactory on a running Node.
-func (n *Node) RegisterService(name string, factory ServiceFactory) error {
-	if n == nil {
-		return errors.New("spacenet: nil node")
-	}
-	if name == "" {
-		return errors.New("spacenet: service name cannot be empty")
-	}
-	if factory == nil {
-		return fmt.Errorf("spacenet: service %q factory cannot be nil", name)
-	}
-	n.lifeMu.RLock()
-	defer n.lifeMu.RUnlock()
-	if n.closed.Load() {
-		return errors.New("spacenet: node is closed")
-	}
-	n.svcMu.Lock()
-	n.services[name] = factory
-	n.svcMu.Unlock()
-	return nil
-}
-
-// UnregisterService removes a named ServiceFactory from a running Node.
-func (n *Node) UnregisterService(name string) {
-	if n == nil || name == "" {
-		return
-	}
-	n.svcMu.Lock()
-	delete(n.services, name)
-	n.svcMu.Unlock()
-}
-
 // Launch creates and initializes a service by registered module name (e.g. "snlua").
 func (n *Node) Launch(serviceName, param string) (uint32, error) {
 	return n.launchInternal(serviceName, param, false)
-}
-
-// LaunchWith creates and initializes an actor directly from handler without
-// registering a global service name, using label in launch/error logs.
-func (n *Node) LaunchWith(label string, handler ServiceHandler, param string) (uint32, error) {
-	if n == nil {
-		return 0, errors.New("spacenet: nil node")
-	}
-	if handler == nil {
-		return 0, errors.New("spacenet: nil service handler")
-	}
-	if label == "" {
-		label = "custom"
-	}
-	return n.launchHandler(label, handler, param, false)
 }
 
 func (n *Node) launchInternal(serviceName, param string, reserved bool) (uint32, error) {
@@ -633,13 +565,6 @@ func (n *Node) launchInternal(serviceName, param string, reserved bool) (uint32,
 	handler := factory()
 	if handler == nil {
 		return 0, fmt.Errorf("spacenet: service %q factory returned nil", serviceName)
-	}
-	return n.launchHandler(serviceName, handler, param, reserved)
-}
-
-func (n *Node) launchHandler(serviceName string, handler ServiceHandler, param string, reserved bool) (uint32, error) {
-	if n.closed.Load() {
-		return 0, errors.New("spacenet: node is closed")
 	}
 
 	killCtx, killCancel := context.WithCancel(context.Background())
