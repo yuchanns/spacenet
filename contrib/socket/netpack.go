@@ -88,11 +88,10 @@ func preloadNetpack(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 		if len(args) == 0 || args[0].IsNil() {
 			return nil, nil
 		}
-		v, ok := st.CheckUserdata(args[0], metaNetpackQueue)
+		q, ok := st.CheckUserdata[*netpackQueue](args[0], metaNetpackQueue)
 		if !ok {
 			return nil, nil
 		}
-		q := v.(*netpackQueue)
 		if len(q.items) == 0 {
 			return nil, nil
 		}
@@ -111,8 +110,8 @@ func preloadNetpack(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 		if len(args) == 0 || args[0].IsNil() {
 			return nil, nil
 		}
-		if v, ok := st.CheckUserdata(args[0], metaNetpackQueue); ok {
-			v.(*netpackQueue).clear()
+		if q, ok := st.CheckUserdata[*netpackQueue](args[0], metaNetpackQueue); ok {
+			q.clear()
 		}
 		return nil, nil
 	}))
@@ -205,8 +204,8 @@ func preloadNetpack(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 		qVal := args[0]
 		var q *netpackQueue
 		if !qVal.IsNil() {
-			if v, ok := st.CheckUserdata(qVal, metaNetpackQueue); ok {
-				q = v.(*netpackQueue)
+			if existing, ok := st.CheckUserdata[*netpackQueue](qVal, metaNetpackQueue); ok {
+				q = existing
 			}
 		}
 		ensureQueue := func() *netpackQueue {

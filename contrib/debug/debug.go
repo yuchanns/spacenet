@@ -245,11 +245,10 @@ func newDebugChanBox(s *moelua.State, ch *debugChan) (moelua.Value, error) {
 			if len(args) < 1 {
 				return nil, errors.New("expected debugchannel")
 			}
-			v, ok := st.CheckUserdata(args[0], metaDebugChannel)
+			box, ok := st.CheckUserdata[*debugChanBox](args[0], metaDebugChannel)
 			if !ok {
 				return nil, errors.New("expected debugchannel")
 			}
-			box := v.(*debugChanBox)
 			if box.ch == nil {
 				return nil, nil
 			}
@@ -277,11 +276,10 @@ func newDebugChanBox(s *moelua.State, ch *debugChan) (moelua.Value, error) {
 			if len(args) < 1 {
 				return nil, errors.New("expected debugchannel")
 			}
-			v, ok := st.CheckUserdata(args[0], metaDebugChannel)
+			box, ok := st.CheckUserdata[*debugChanBox](args[0], metaDebugChannel)
 			if !ok {
 				return nil, errors.New("expected debugchannel")
 			}
-			box := v.(*debugChanBox)
 			if len(args) < 2 || !args[1].IsString() {
 				return nil, errors.New("bad argument #2 to 'write' (string expected)")
 			}
@@ -302,8 +300,7 @@ func lDebugRelease(s *moelua.State, args []moelua.Value) ([]moelua.Value, error)
 	if len(args) == 0 {
 		return nil, nil
 	}
-	if v, ok := s.CheckUserdata(args[0], metaDebugChannel); ok {
-		box := v.(*debugChanBox)
+	if box, ok := s.CheckUserdata[*debugChanBox](args[0], metaDebugChannel); ok {
 		if box.ch != nil {
 			box.ch.release()
 			box.ch = nil

@@ -109,8 +109,7 @@ func preloadSTM(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 			if len(args) == 0 {
 				return nil, nil
 			}
-			if v, ok := st.CheckUserdata(args[0], metaSTMWriter); ok {
-				box := v.(*stmWriterBox)
+			if box, ok := st.CheckUserdata[*stmWriterBox](args[0], metaSTMWriter); ok {
 				if box.obj != nil {
 					box.obj.releaseWriter()
 					box.obj = nil
@@ -119,11 +118,10 @@ func preloadSTM(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 			return nil, nil
 		}))
 		_ = writerMT.SetString("__call", s.NewFunc("stm.writer.__call", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-			v, ok := st.CheckUserdata(args[0], metaSTMWriter)
+			box, ok := st.CheckUserdata[*stmWriterBox](args[0], metaSTMWriter)
 			if !ok {
 				return nil, errors.New("invalid stm writer")
 			}
-			box := v.(*stmWriterBox)
 			if box.obj == nil {
 				return nil, errors.New("stm writer closed")
 			}
@@ -145,8 +143,7 @@ func preloadSTM(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 			if len(args) == 0 {
 				return nil, nil
 			}
-			if v, ok := st.CheckUserdata(args[0], metaSTMReader); ok {
-				box := v.(*stmReaderBox)
+			if box, ok := st.CheckUserdata[*stmReaderBox](args[0], metaSTMReader); ok {
 				if box.obj != nil {
 					box.obj.releaseReader()
 					box.obj = nil
@@ -156,14 +153,13 @@ func preloadSTM(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 			return nil, nil
 		}))
 		_ = readerMT.SetString("__call", s.NewFunc("stm.reader.__call", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-			v, ok := st.CheckUserdata(args[0], metaSTMReader)
+			box, ok := st.CheckUserdata[*stmReaderBox](args[0], metaSTMReader)
 			if !ok {
 				return nil, errors.New("invalid stm reader")
 			}
 			if len(args) < 2 || !args[1].IsFunction() {
 				return nil, errors.New("bad argument #1 to stm reader (function expected)")
 			}
-			box := v.(*stmReaderBox)
 			if box.obj == nil {
 				return []moelua.Value{moelua.Bool(false)}, nil
 			}
@@ -218,11 +214,10 @@ func preloadSTM(s *moelua.State, _ []moelua.Value) ([]moelua.Value, error) {
 	}))
 
 	_ = tbl.SetString("copy", s.NewFunc("stm.copy", func(st *moelua.State, args []moelua.Value) ([]moelua.Value, error) {
-		v, ok := st.CheckUserdata(args[0], metaSTMWriter)
+		box, ok := st.CheckUserdata[*stmWriterBox](args[0], metaSTMWriter)
 		if !ok {
 			return nil, errors.New("expected stm writer")
 		}
-		box := v.(*stmWriterBox)
 		if box.obj == nil {
 			return nil, errors.New("stm writer closed")
 		}

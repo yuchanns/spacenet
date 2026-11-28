@@ -426,8 +426,8 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 				if len(cargs) == 0 {
 					return nil, nil
 				}
-				if v, ok := cst.CheckUserdata(cargs[0], metaMatrixState); ok {
-					v.(*matrixState).close()
+				if m, ok := cst.CheckUserdata[*matrixState](cargs[0], metaMatrixState); ok {
+					m.close()
 				}
 				return nil, nil
 			}))
@@ -435,11 +435,10 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 				if len(cargs) == 0 {
 					return nil, errors.New("expected BOXMATRIXSTATE")
 				}
-				v, ok := cst.CheckUserdata(cargs[0], metaMatrixState)
+				m, ok := cst.CheckUserdata[*matrixState](cargs[0], metaMatrixState)
 				if !ok {
 					return nil, errors.New("expected BOXMATRIXSTATE")
 				}
-				m := v.(*matrixState)
 				m.mu.Lock()
 				tok := m.tok
 				closed := m.closed
@@ -453,11 +452,10 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 				if len(cargs) == 0 {
 					return nil, errors.New("expected BOXMATRIXSTATE")
 				}
-				v, ok := cst.CheckUserdata(cargs[0], metaMatrixState)
+				m, ok := cst.CheckUserdata[*matrixState](cargs[0], metaMatrixState)
 				if !ok {
 					return nil, errors.New("expected BOXMATRIXSTATE")
 				}
-				m := v.(*matrixState)
 				m.mu.Lock()
 				var sz int64
 				if !m.closed && m.root != nil {
@@ -470,8 +468,8 @@ func preloadShareTableCore(s *moelua.State, _ []moelua.Value) ([]moelua.Value, e
 				if len(cargs) == 0 {
 					return nil, nil
 				}
-				if v, ok := cst.CheckUserdata(cargs[0], metaMatrixState); ok {
-					v.(*matrixState).close()
+				if m, ok := cst.CheckUserdata[*matrixState](cargs[0], metaMatrixState); ok {
+					m.close()
 				}
 				return nil, nil
 			}))
